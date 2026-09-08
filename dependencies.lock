@@ -1,0 +1,57 @@
+dependencies:
+  espressif/as5600:
+    component_hash: ddbb4bb2ca69d3d1f46faa1a433c0cd1ca9c495d676bfa7a08abfec6d2e8ec44
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.3'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 0.1.0
+  espressif/iqmath:
+    component_hash: 39448db759b410373e543798167ca4670bbff3019cb290a2fe8e627221e71b9d
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=4.4'
+    source:
+      registry_url: https://components.espressif.com
+      type: service
+    version: 1.11.0~1
+  espressif/pid_ctrl:
+    component_hash: 974be0666bb4d95f49677327dd8305781d04d8bae284fdde2fbadf06ca9d4979
+    dependencies:
+    - name: espressif/iqmath
+      registry_url: https://components.espressif.com
+      require: private
+      version: ^1.11.0
+    - name: idf
+      require: private
+      version: '>=4.4'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 0.3.1
+  idf:
+    source:
+      type: idf
+    version: 6.0.2
+  jef-sure/hd44780:
+    component_hash: 852a5a07f5e8a923543e7ac0130e6f24e16e351e89ade29952003bd67e74e9e7
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 0.0.1
+direct_dependencies:
+- espressif/as5600
+- espressif/pid_ctrl
+- idf
+- jef-sure/hd44780
+manifest_hash: f814d64d3f9186f8a063d57177979273c7812807766f0ac87f453cf7bcd25aff
+target: esp32
+version: 3.0.0
