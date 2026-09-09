@@ -1,0 +1,46 @@
+dependencies:
+  espressif/as5600:
+    component_hash: ddbb4bb2ca69d3d1f46faa1a433c0cd1ca9c495d676bfa7a08abfec6d2e8ec44
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.3'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 0.1.0
+  espressif/iqmath:
+    component_hash: 39448db759b410373e543798167ca4670bbff3019cb290a2fe8e627221e71b9d
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=4.4'
+    source:
+      registry_url: https://components.espressif.com
+      type: service
+    version: 1.11.0~1
+  espressif/pid_ctrl:
+    component_hash: 974be0666bb4d95f49677327dd8305781d04d8bae284fdde2fbadf06ca9d4979
+    dependencies:
+    - name: espressif/iqmath
+      registry_url: https://components.espressif.com
+      require: private
+      version: ^1.11.0
+    - name: idf
+      require: private
+      version: '>=4.4'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 0.3.1
+  idf:
+    source:
+      type: idf
+    version: 6.0.0
+direct_dependencies:
+- espressif/as5600
+- espressif/pid_ctrl
+- idf
+manifest_hash: 862ff4372be1c7c81266e1a0779944fa124caa6add38329ef2b23d21fc3bd5c3
+target: esp32s3
+version: 3.0.0
