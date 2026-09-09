@@ -66,6 +66,7 @@ static const perfil_pid_t perfiles[] = {
 };
 #define NUM_PERFILES (sizeof(perfiles)/sizeof(perfiles[0]))
 
+//Estructura para mandar por cola hacia el UART
 typedef enum { CMD_ANGULO, CMD_PERFIL } cmd_type_t;
 
 typedef struct {
@@ -74,9 +75,22 @@ typedef struct {
     int   perfil;
 } uart_cmd_t;
 
+//Estructura para mandar por cola hacia el motor
+typedef enum { MOTOR_CMD_PID, MOTOR_CMD_STOP } motor_cmd_type_t;
+
+typedef struct {
+    motor_cmd_type_t tipo;
+    float pid_output;   // solo válido si tipo == MOTOR_CMD_PID
+} motor_cmd_t;
+
+static QueueHandle_t motor_queue;
 static QueueHandle_t cmd_queue;
+static QueueHandle_t encoder_queue;
+
 static volatile int perfil_actual = 0;
 static volatile float angulo_deseado = 0.0f;
+
+//Configuracion 
 
 static esp_err_t Config(void){
 
@@ -177,14 +191,7 @@ static void pid_init(void)
     ESP_ERROR_CHECK(pid_new_control_block_f(&pid_config, &pid_ctrl));
 }
 
-static void Motor_stop(void)
-{
-    gpio_set_level(L298N_IN1_GPIO, 0);
-    gpio_set_level(L298N_IN2_GPIO, 0);
-
-    ledc_set_duty(LEDC_MODE, LEDC_CHANNEL, 0);
-    ledc_update_duty(LEDC_MODE, LEDC_CHANNEL);
-}
+//Funciones
 
 static float normalizar_error_angular(float error)
 {
@@ -194,35 +201,74 @@ static float normalizar_error_angular(float error)
     return error;
 }
 
-static void Motor_aplicar_pid(float pid_output)
+//Tareas
+
+static void Encoder_task(void *pvParameters)
 {
-    float magnitud = fabsf(pid_output);
- 
-    if (magnitud < MOTOR_MIN_DUTY && magnitud > 0.0f) {
-        magnitud = MOTOR_MIN_DUTY;
+    float angulo_actual = 0.0f;
+
+    while (1) {
+        esp_err_t err = as5600_get_angle_degrees(as5600_dev, &angulo_actual);
+
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Error leyendo AS5600: %s", esp_err_to_name(err));
+        } else {
+            xQueueOverwrite(encoder_queue, &angulo_actual);
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(10));  // frecuencia de muestreo del encoder
     }
-    if (magnitud > LEDC_DUTY_MAX) {
-        magnitud = LEDC_DUTY_MAX;
-    }
- 
-    if (pid_output > 0.0f) {
-        // Avanzar
-        gpio_set_level(L298N_IN1_GPIO, 1);
-        gpio_set_level(L298N_IN2_GPIO, 0);
-    } else if (pid_output < 0.0f) {
-        // Retroceder
-        gpio_set_level(L298N_IN1_GPIO, 0);
-        gpio_set_level(L298N_IN2_GPIO, 1);
-    } else {
-        gpio_set_level(L298N_IN1_GPIO, 0);
-        gpio_set_level(L298N_IN2_GPIO, 0);
-    }
- 
-    ledc_set_duty(LEDC_MODE, LEDC_CHANNEL, (uint32_t)magnitud);
-    ledc_update_duty(LEDC_MODE, LEDC_CHANNEL);
 }
 
-static void uart_task(void *arg)
+static void motor_task(void *pvParameters)
+{
+    motor_cmd_t cmd;
+
+    while (1) {
+        // Bloquea hasta que llegue un comando nuevo
+        if (xQueueReceive(motor_queue, &cmd, portMAX_DELAY) == pdTRUE) {
+
+            ESP_LOGI("MOTOR_TASK", "cmd recibido: tipo=%d pid_output=%.2f",
+             cmd.tipo, cmd.pid_output);
+
+            if (cmd.tipo == MOTOR_CMD_STOP) {
+                gpio_set_level(L298N_IN1_GPIO, 0);
+                gpio_set_level(L298N_IN2_GPIO, 0);
+                ledc_set_duty(LEDC_MODE, LEDC_CHANNEL, 0);
+                ledc_update_duty(LEDC_MODE, LEDC_CHANNEL);
+                continue;
+            }
+
+            float pid_output = cmd.pid_output;
+            float magnitud = fabsf(pid_output);
+
+            if (magnitud < MOTOR_MIN_DUTY && magnitud > 0.0f) {
+                magnitud = MOTOR_MIN_DUTY;
+            }
+            if (magnitud > LEDC_DUTY_MAX) {
+                magnitud = LEDC_DUTY_MAX;
+            }
+
+            if (pid_output > 0.0f) {
+                gpio_set_level(L298N_IN1_GPIO, 1);
+                gpio_set_level(L298N_IN2_GPIO, 0);
+            } else if (pid_output < 0.0f) {
+                gpio_set_level(L298N_IN1_GPIO, 0);
+                gpio_set_level(L298N_IN2_GPIO, 1);
+            } else {
+                gpio_set_level(L298N_IN1_GPIO, 0);
+                gpio_set_level(L298N_IN2_GPIO, 0);
+            }
+
+            ledc_set_duty(LEDC_MODE, LEDC_CHANNEL, (uint32_t)magnitud);
+            ledc_update_duty(LEDC_MODE, LEDC_CHANNEL);
+            ESP_LOGI("MOTOR_TASK", "Aplicando duty=%.0f dir_IN1=%d dir_IN2=%d",
+         magnitud, gpio_get_level(L298N_IN1_GPIO), gpio_get_level(L298N_IN2_GPIO));
+        }
+    }
+}
+
+static void uart_task(void *pvParameters)
 {
     uint8_t data[BUF_SIZE];
     char line_buf[UART_LINE_BUF_SIZE]; //buffer para almacenar la linea completa de entrada
@@ -287,7 +333,7 @@ static void uart_task(void *arg)
     }
 }
 
-static void control_task(void *arg)
+static void control_task(void *pvParameters)
 {
 
     float angulo_actual = 0.0f;
@@ -319,17 +365,21 @@ static void control_task(void *arg)
             }
         }
 
-        esp_err_t err = as5600_get_angle_degrees(as5600_dev, &angulo_actual);
+        if (xQueuePeek(encoder_queue, &angulo_actual, 0) != pdTRUE) {
+        ESP_LOGW(TAG, "Sin dato de encoder, usando ultimo valor: %.2f", angulo_actual);
+    }
 
         float error = angulo_deseado - angulo_actual;
         error = normalizar_error_angular(error);
 
          if (fabsf(error) < ERROR_DEADBAND_DEG) {
-            Motor_stop();
+            motor_cmd_t cmd = { .tipo = MOTOR_CMD_STOP };
+            xQueueSend(motor_queue, &cmd, 0);
             pid_reset_ctrl_block_f(pid_ctrl);
         } else {
             ESP_ERROR_CHECK(pid_compute_f(pid_ctrl, error, &pid_output));
-            Motor_aplicar_pid(pid_output);
+            motor_cmd_t cmd = { .tipo = MOTOR_CMD_PID, .pid_output = pid_output };
+            xQueueSend(motor_queue, &cmd, 0);
         }
   
         ESP_LOGI(TAG, "Angulo actual: %.2f | deseado: %.2f | error: %.2f | salida PID: %.2f", angulo_actual, angulo_deseado, error, pid_output);
@@ -357,7 +407,18 @@ void app_main(void){
         ESP_LOGE(TAG, "No se pudo crear cmd_queue");
     }
 
+    motor_queue = xQueueCreate(5, sizeof(motor_cmd_t));
+    if (motor_queue == NULL) {
+        ESP_LOGE(TAG, "No se pudo crear motor_queue");      
+    }
+
+    encoder_queue = xQueueCreate(1, sizeof(float));
+    if (encoder_queue == NULL) {
+        ESP_LOGE(TAG, "No se pudo crear encoder_queue"); 
+    }
+
     xTaskCreate(control_task, "control_task", 4096, NULL, 5, NULL);
     xTaskCreate(uart_task, "uart_task", 4096, NULL, 5, NULL);
-
+    xTaskCreate(motor_task, "motor_task", 4096, NULL, 5, NULL);
+    xTaskCreate(Encoder_task, "Encoder_task", 4096, NULL, 5, NULL);
 }
