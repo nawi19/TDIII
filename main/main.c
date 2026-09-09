@@ -47,12 +47,22 @@
 #define NVS_NAMESPACE   "motor_cfg"
 #define NVS_KEY_ANGULO  "angulo_des"
 
+#define PIN_ORIGEN 39       //DEFINES de botones
+#define PIN_START 40        //DEFINES de botones
+#define PIN_STOP 41         //DEFINES de botones
+#define PIN_MODO 42         //DEFINES de botones
+
 static i2c_master_bus_handle_t i2c_bus_handle = NULL;
 static as5600_handle_t as5600_dev = NULL;
 static const char *TAG = "MOTOR_ANGULO";
 static pid_ctrl_block_handle_f_t pid_ctrl = NULL;
 
+void isr_BTN_ORIGEN(void *arg);             //INTERRUPCIONES DE BOTONES
+void isr_BTN_START(void *arg);              //INTERRUPCIONES DE BOTONES
+void isr_BTN_STOP(void *arg);               //INTERRUPCIONES DE BOTONES
+void isr_BTN_MODO(void *arg);               //INTERRUPCIONES DE BOTONES
 
+//Estructura con las ganancias y perfiles del PID
 typedef struct {
     const char *nombre;
     float kp;
@@ -83,17 +93,46 @@ typedef struct {
     float pid_output;   // solo válido si tipo == MOTOR_CMD_PID
 } motor_cmd_t;
 
+//Definición de colas
+
 static QueueHandle_t motor_queue;
 static QueueHandle_t cmd_queue;
 static QueueHandle_t encoder_queue;
 static QueueHandle_t flash_queue;
 
+
+
+TaskHandle_t xHandle_BTN_ORIGEN=NULL;
+TaskHandle_t xHandle_BTN_START=NULL;
+TaskHandle_t xHandle_BTN_STOP=NULL;
+TaskHandle_t xHandle_BTN_MODO=NULL;
+
+//Variables globales
+
 static volatile int perfil_actual = 0;
 static volatile float angulo_deseado = 0.0f;
+static uint8_t ucParameterToPass;
+
+bool activo=0;  //Indica si el PID se encuentra activo o no
+volatile bool rebote=0; //Implementación de antirrebote
+
+bool origen=0;      //VARIABLES DE BOTONES
+bool start=0;       //VARIABLES DE BOTONES
+bool stop=0;        //VARIABLES DE BOTONES
+bool modo=0;        //VARIABLES DE BOTONES
 
 //Configuracion 
 
-static esp_err_t Config(void){
+static esp_err_t Config_Pines(void){
+
+    gpio_config_t BOTONERA_io_conf = {       //CONFIGURACION GPIO DE LOS PINES DE BOTONERA
+        .pin_bit_mask = (1ULL << PIN_ORIGEN | 1ULL << PIN_START | 1ULL << PIN_STOP | 1ULL << PIN_MODO),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_NEGEDGE,
+    };
+    ESP_ERROR_CHECK(gpio_config(&BOTONERA_io_conf));
 
     gpio_config_t io_conf = {
         .pin_bit_mask = (1ULL << L298N_IN1_GPIO) | (1ULL << L298N_IN2_GPIO),
@@ -126,6 +165,13 @@ static esp_err_t Config(void){
         .hpoint         = 0,
     };
     ESP_ERROR_CHECK(ledc_channel_config(&ledc_channel));
+
+    gpio_install_isr_service(0);    //Instalar ISR service
+
+    gpio_isr_handler_add(PIN_ORIGEN,    isr_BTN_ORIGEN, NULL); 
+    gpio_isr_handler_add(PIN_START,     isr_BTN_START,  NULL);
+    gpio_isr_handler_add(PIN_STOP,      isr_BTN_STOP,   NULL); 
+    gpio_isr_handler_add(PIN_MODO,      isr_BTN_MODO,   NULL); 
 
     return ESP_OK; 
 }   
@@ -465,9 +511,92 @@ static void flashtask(void *pvParameters){
 
 }
 
+//Interrupciones de botones
+
+void IRAM_ATTR isr_BTN_ORIGEN(void *arg)    //Interrupción de boton ORIGEN
+{
+    if (!rebote){
+        rebote=0;
+        xTaskResumeFromISR(xHandle_BTN_ORIGEN);
+    }
+    return;
+}
+
+void IRAM_ATTR isr_BTN_START(void *arg)     //Interrupción de boton START / PIDE UN ANGULO DESEADO
+{   
+    if (!rebote){
+        rebote=1;
+        xTaskResumeFromISR(xHandle_BTN_START);
+    }
+    return;
+}
+
+void IRAM_ATTR isr_BTN_STOP(void *arg)      //Interrupción de boton STOP/ calibrar CERO
+{
+    xTaskResumeFromISR(xHandle_BTN_STOP);
+    return;
+}
+
+void IRAM_ATTR isr_BTN_MODO(void *arg)      //Interrupción de boton MODO 
+{
+    if (!rebote){
+        rebote=1;
+        xTaskResumeFromISR(xHandle_BTN_MODO);
+    }
+    return;
+}
+
+void task_BTN_ORIGEN (void *pvParameters)  //Función del boton ORIGEN
+{
+    while (1){
+        angulo_deseado=0.0;
+        vTaskDelay(pdMS_TO_TICKS(100));
+        vTaskSuspend(NULL);
+    }
+}
+
+void task_BTN_START (void *pvParameters)  //Función del boton START:
+{
+    while (1){
+        activo=!activo;
+        as5600_set_zero_position(as5600_dev);
+
+        float angulo_leido;
+        as5600_get_angle_degrees(as5600_dev, &angulo_leido);
+        angulo_deseado = angulo_leido;
+
+        vTaskDelay(pdMS_TO_TICKS(500)); //para antirrebote
+        rebote=0;
+        vTaskSuspend(NULL);
+    }
+}
+
+void task_BTN_STOP (void *pvParameters)  //Cambia el angulo deseado a la posición actual del eje
+{
+    while (1){
+
+        float angulo_leido;
+        as5600_get_angle_degrees(as5600_dev, &angulo_leido);
+        angulo_deseado = angulo_leido;
+
+        vTaskDelay(pdMS_TO_TICKS(100));
+        vTaskSuspend(NULL);
+    }
+}
+
+void task_BTN_MODO (void *pvParameters)  //Función del boton MODO: Modifica perfiles mediante los coeficientes PID
+{
+    while (1){
+        modo=!modo;
+        vTaskDelay(pdMS_TO_TICKS(100));
+        rebote=0;
+        vTaskSuspend(NULL);
+    }
+}
+
 void app_main(void){
 
-    ESP_ERROR_CHECK(Config());
+    Config_Pines();
     as5600_init();
     pid_init();
     Usart_config();
@@ -500,4 +629,12 @@ void app_main(void){
     xTaskCreate(motor_task, "motor_task", 4096, NULL, 5, NULL);
     xTaskCreate(Encoder_task, "Encoder_task", 4096, NULL, 5, NULL);
     xTaskCreate(flashtask, "flashtask", 4096, NULL, 2, NULL);
+
+    //tareas de los botones 
+
+    xTaskCreate(task_BTN_ORIGEN,"task_BTN_ORIGEN",2048,&ucParameterToPass,1,&xHandle_BTN_ORIGEN);
+    xTaskCreate(task_BTN_START,"task_BTN_START",2048,&ucParameterToPass,1,&xHandle_BTN_START);
+    xTaskCreate(task_BTN_STOP,"task_BTN_STOP",2048,&ucParameterToPass,1,&xHandle_BTN_STOP);
+    xTaskCreate(task_BTN_MODO,"task_BTN_MODO",2048,&ucParameterToPass,1,&xHandle_BTN_MODO);
+
 }
