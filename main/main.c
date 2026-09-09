@@ -86,6 +86,7 @@ typedef struct {
 static QueueHandle_t motor_queue;
 static QueueHandle_t cmd_queue;
 static QueueHandle_t encoder_queue;
+static QueueHandle_t flash_queue;
 
 static volatile int perfil_actual = 0;
 static volatile float angulo_deseado = 0.0f;
@@ -148,7 +149,7 @@ uart_config_t uart_config = {
     }
 
     static void as5600_init(void)
-{
+    {
     i2c_master_bus_config_t bus_config = {
         .i2c_port = I2C_MASTER_NUM,
         .sda_io_num = I2C_MASTER_SDA_IO,
@@ -191,6 +192,16 @@ static void pid_init(void)
     ESP_ERROR_CHECK(pid_new_control_block_f(&pid_config, &pid_ctrl));
 }
 
+static void nvs_init(void)
+{
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
+}
+
 //Funciones
 
 static float normalizar_error_angular(float error)
@@ -201,6 +212,49 @@ static float normalizar_error_angular(float error)
     return error;
 }
 
+static void guardar_angulo_deseado(float angulo)
+{
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "No se pudo abrir NVS para guardar: %s", esp_err_to_name(err));
+        return;
+    }
+
+    err = nvs_set_blob(handle, NVS_KEY_ANGULO, &angulo, sizeof(angulo));
+    if (err == ESP_OK) {
+        err = nvs_commit(handle);
+    }
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Error guardando angulo en NVS: %s", esp_err_to_name(err));
+    }
+
+    nvs_close(handle);
+}
+
+static float cargar_angulo_deseado(void)
+{
+    nvs_handle_t handle;
+    float angulo = 0.0f; // valor por defecto si es la primera vez
+
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle);
+    if (err != ESP_OK) {
+        ESP_LOGI(TAG, "No hay config previa en NVS, usando default (%.2f)", angulo);
+        return angulo;
+    }
+
+    size_t size = sizeof(angulo);
+    err = nvs_get_blob(handle, NVS_KEY_ANGULO, &angulo, &size);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "No se pudo leer angulo de NVS, usando default");
+        angulo = 0.0f;
+    } else {
+        ESP_LOGI(TAG, "Angulo deseado recuperado de NVS: %.2f", angulo);
+    }
+
+    nvs_close(handle);
+    return angulo;
+}
 //Tareas
 
 static void Encoder_task(void *pvParameters)
@@ -346,6 +400,8 @@ static void control_task(void *pvParameters)
         while (xQueueReceive(cmd_queue, &cmd, 0) == pdTRUE) {
             if (cmd.tipo == CMD_ANGULO) {
                 angulo_deseado = cmd.angulo;
+                float angulo_deseado_flash = angulo_deseado;
+                xQueueOverwrite(flash_queue, &angulo_deseado_flash); // Guardar en NVS
             } else if (cmd.tipo == CMD_PERFIL && cmd.perfil < NUM_PERFILES) {
                 perfil_actual = cmd.perfil;
 
@@ -394,6 +450,20 @@ static void control_task(void *pvParameters)
     }
 }
 
+static void flashtask(void *pvParameters){
+
+    float angulo_deseado_flash;
+
+    while(1){
+
+        if(xQueueReceive(flash_queue, &angulo_deseado_flash, portMAX_DELAY) == pdTRUE){
+
+            guardar_angulo_deseado(angulo_deseado_flash);
+            ESP_LOGI(TAG, "Angulo deseado guardado en NVS: %.2f", angulo_deseado_flash);
+        }
+    }
+
+}
 
 void app_main(void){
 
@@ -401,6 +471,7 @@ void app_main(void){
     as5600_init();
     pid_init();
     Usart_config();
+    nvs_init();
 
     cmd_queue = xQueueCreate(5, sizeof(uart_cmd_t));
     if (cmd_queue == NULL) {
@@ -417,8 +488,16 @@ void app_main(void){
         ESP_LOGE(TAG, "No se pudo crear encoder_queue"); 
     }
 
+    flash_queue = xQueueCreate(1, sizeof(float));
+    if( flash_queue == NULL) {
+        ESP_LOGE(TAG, "No se pudo crear flash_queue");
+    }   
+
+    angulo_deseado = cargar_angulo_deseado();
+
     xTaskCreate(control_task, "control_task", 4096, NULL, 5, NULL);
     xTaskCreate(uart_task, "uart_task", 4096, NULL, 5, NULL);
     xTaskCreate(motor_task, "motor_task", 4096, NULL, 5, NULL);
     xTaskCreate(Encoder_task, "Encoder_task", 4096, NULL, 5, NULL);
+    xTaskCreate(flashtask, "flashtask", 4096, NULL, 2, NULL);
 }
