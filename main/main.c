@@ -57,10 +57,11 @@ static as5600_handle_t as5600_dev = NULL;
 static const char *TAG = "MOTOR_ANGULO";
 static pid_ctrl_block_handle_f_t pid_ctrl = NULL;
 
-void isr_BTN_ORIGEN(void *arg);             //INTERRUPCIONES DE BOTONES
+/*void isr_BTN_ORIGEN(void *arg);             //INTERRUPCIONES DE BOTONES
 void isr_BTN_START(void *arg);              //INTERRUPCIONES DE BOTONES
 void isr_BTN_STOP(void *arg);               //INTERRUPCIONES DE BOTONES
 void isr_BTN_MODO(void *arg);               //INTERRUPCIONES DE BOTONES
+*/
 
 //Estructura con las ganancias y perfiles del PID
 typedef struct {
@@ -102,10 +103,10 @@ static QueueHandle_t flash_queue;
 
 
 
-TaskHandle_t xHandle_BTN_ORIGEN=NULL;
+/*TaskHandle_t xHandle_BTN_ORIGEN=NULL;
 TaskHandle_t xHandle_BTN_START=NULL;
 TaskHandle_t xHandle_BTN_STOP=NULL;
-TaskHandle_t xHandle_BTN_MODO=NULL;
+TaskHandle_t xHandle_BTN_MODO=NULL;*/
 
 //Variables globales
 
@@ -113,17 +114,17 @@ static volatile int perfil_actual = 0;
 static volatile float angulo_deseado = 0.0f;
 static uint8_t ucParameterToPass;
 
-bool activo=0;  //Indica si el PID se encuentra activo o no
+/*bool activo=0;  //Indica si el PID se encuentra activo o no
 volatile bool rebote=0; //Implementación de antirrebote
 
 bool origen=0;      //VARIABLES DE BOTONES
 bool start=0;       //VARIABLES DE BOTONES
 bool stop=0;        //VARIABLES DE BOTONES
-bool modo=0;        //VARIABLES DE BOTONES
+bool modo=0;        //VARIABLES DE BOTONES*/
 
 //Configuracion 
 
-static esp_err_t Config_Pines(void){
+static esp_err_t GPIO_config(void){
 
     gpio_config_t BOTONERA_io_conf = {       //CONFIGURACION GPIO DE LOS PINES DE BOTONERA
         .pin_bit_mask = (1ULL << PIN_ORIGEN | 1ULL << PIN_START | 1ULL << PIN_STOP | 1ULL << PIN_MODO),
@@ -166,6 +167,11 @@ static esp_err_t Config_Pines(void){
     };
     ESP_ERROR_CHECK(ledc_channel_config(&ledc_channel));
 
+    return ESP_OK; 
+}   
+
+/*static void IRQ_config(void){
+
     gpio_install_isr_service(0);    //Instalar ISR service
 
     gpio_isr_handler_add(PIN_ORIGEN,    isr_BTN_ORIGEN, NULL); 
@@ -173,8 +179,7 @@ static esp_err_t Config_Pines(void){
     gpio_isr_handler_add(PIN_STOP,      isr_BTN_STOP,   NULL); 
     gpio_isr_handler_add(PIN_MODO,      isr_BTN_MODO,   NULL); 
 
-    return ESP_OK; 
-}   
+}*/
 
 static void Usart_config(){
 
@@ -513,7 +518,7 @@ static void flashtask(void *pvParameters){
 
 //Interrupciones de botones
 
-void IRAM_ATTR isr_BTN_ORIGEN(void *arg)    //Interrupción de boton ORIGEN
+/*void IRAM_ATTR isr_BTN_ORIGEN(void *arg)    //Interrupción de boton ORIGEN
 {
     if (!rebote){
         rebote=0;
@@ -593,10 +598,10 @@ void task_BTN_MODO (void *pvParameters)  //Función del boton MODO: Modifica per
         vTaskSuspend(NULL);
     }
 }
-
+*/
 void app_main(void){
 
-    Config_Pines();
+    GPIO_config();
     as5600_init();
     pid_init();
     Usart_config();
@@ -632,9 +637,11 @@ void app_main(void){
 
     //tareas de los botones 
 
-    xTaskCreate(task_BTN_ORIGEN,"task_BTN_ORIGEN",2048,&ucParameterToPass,1,&xHandle_BTN_ORIGEN);
+    /*xTaskCreate(task_BTN_ORIGEN,"task_BTN_ORIGEN",2048,&ucParameterToPass,1,&xHandle_BTN_ORIGEN);
     xTaskCreate(task_BTN_START,"task_BTN_START",2048,&ucParameterToPass,1,&xHandle_BTN_START);
     xTaskCreate(task_BTN_STOP,"task_BTN_STOP",2048,&ucParameterToPass,1,&xHandle_BTN_STOP);
     xTaskCreate(task_BTN_MODO,"task_BTN_MODO",2048,&ucParameterToPass,1,&xHandle_BTN_MODO);
+
+    IRQ_config();*/
 
 }
