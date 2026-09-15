@@ -37,10 +37,21 @@ dependencies:
     source:
       type: idf
     version: 6.0.0
+  jef-sure/hd44780:
+    component_hash: 852a5a07f5e8a923543e7ac0130e6f24e16e351e89ade29952003bd67e74e9e7
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 0.0.1
 direct_dependencies:
 - espressif/as5600
 - espressif/pid_ctrl
 - idf
-manifest_hash: 862ff4372be1c7c81266e1a0779944fa124caa6add38329ef2b23d21fc3bd5c3
+- jef-sure/hd44780
+manifest_hash: f814d64d3f9186f8a063d57177979273c7812807766f0ac87f453cf7bcd25aff
 target: esp32s3
 version: 3.0.0

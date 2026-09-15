@@ -14,15 +14,20 @@
 
 #include "as5600.h"
 #include "pid_ctrl.h"
+#include "hd44780.h"    
 
 #define L298N_IN1_GPIO           3     
 #define L298N_IN2_GPIO           8     
 #define L298N_ENA_GPIO           18
 
 #define I2C_MASTER_NUM          I2C_NUM_0
+#define I2C_FREQ                100000     
+#define LCD_DIR                 0x27
 #define I2C_MASTER_SDA_IO       5
 #define I2C_MASTER_SCL_IO       4
 #define I2C_MASTER_FREQ_HZ      400000
+#define I2C_CHN                 0
+#define ESP_LOGI_TAG            "Nahui"
 
 #define LEDC_TIMER               LEDC_TIMER_0
 #define LEDC_MODE                LEDC_LOW_SPEED_MODE
@@ -52,10 +57,13 @@
 #define PIN_STOP 41         //DEFINES de botones
 #define PIN_MODO 42         //DEFINES de botones
 
+static lcd_bus_hd44780_t *LCD1_BUS = NULL;
 static i2c_master_bus_handle_t i2c_bus_handle = NULL;
 static as5600_handle_t as5600_dev = NULL;
 static const char *TAG = "MOTOR_ANGULO";
 static pid_ctrl_block_handle_f_t pid_ctrl = NULL;
+
+QueueHandle_t queue_I2C_LCD;
 
 /*void isr_BTN_ORIGEN(void *arg);             //INTERRUPCIONES DE BOTONES
 void isr_BTN_START(void *arg);              //INTERRUPCIONES DE BOTONES
@@ -199,28 +207,62 @@ uart_config_t uart_config = {
 
     }
 
-    static void as5600_init(void)
+void LCD_init() //Inicialización del LCD E INICIALIZA EL I2C
+{
+    LCD1_BUS = lcd_bus_pcf8574_i2c_create( 
+        I2C_CHN,
+        LCD_DIR,
+        I2C_MASTER_SDA_IO,
+        I2C_MASTER_SCL_IO,
+        I2C_FREQ);
+
+    if (!LCD1_BUS) return;
+
+    hd44780_t *LCD1 = lcd_init(LCD1_BUS, HD44780_GEOMETRY_20X4, true);
+    if (!LCD1)
     {
-    i2c_master_bus_config_t bus_config = {
-        .i2c_port = I2C_MASTER_NUM,
-        .sda_io_num = I2C_MASTER_SDA_IO,
-        .scl_io_num = I2C_MASTER_SCL_IO,
-        .clk_source = I2C_CLK_SRC_DEFAULT,
-        .glitch_ignore_cnt = 7,
-        .flags.enable_internal_pullup = true,
-    };
-    ESP_ERROR_CHECK(i2c_new_master_bus(&bus_config, &i2c_bus_handle));
-
-    as5600_i2c_config_t as5600_config = {
-        .scl_speed_hz = I2C_MASTER_FREQ_HZ
-    };
-    ESP_ERROR_CHECK(as5600_new_sensor(i2c_bus_handle, &as5600_config, &as5600_dev));
-
-    // Chequeo opcional de presencia del iman
-    as5600_magnet_status_t status;
-    if (as5600_get_magnet_status(as5600_dev, &status) == ESP_OK) {
-        ESP_LOGI(TAG, "Estado iman AS5600: %d", (int)status);
+        if (LCD1_BUS->destroy) LCD1_BUS->destroy(&LCD1_BUS);
+        return;
     }
+
+    lcd_backlight_on(LCD1);
+    lcd_clear_screen(LCD1);
+
+    lcd_set_cursor(LCD1, 0, 0);
+    lcd_write_str(LCD1, " Tecnicas Digitales ");
+
+    lcd_set_cursor(LCD1, 0, 1);
+    lcd_write_str(LCD1, "        2026        ");
+
+    lcd_set_cursor(LCD1, 0, 2);
+    lcd_write_str(LCD1, "  Bernal -- Faraco  ");
+
+    lcd_set_cursor(LCD1, 0, 3);
+    lcd_write_str(LCD1, "    Control  PID    ");
+}
+
+
+    void AS5600_init()  //Inicialización del encoder AS5600
+{
+    i2c_master_bus_handle_t bus_handle = lcd_bus_pcf8574_get_i2c_bus(I2C_CHN);  //Toma el BUS de I2C generado por la función de LCD. Lo guarda en bus_handle
+
+    if (bus_handle == NULL) {   //Si el bus obtenido no es correcto:
+        ESP_LOGE(ESP_LOGI_TAG, "ERROR DE OBTENCIÓN BUS I2C");
+        return;
+    }
+
+    as5600_i2c_config_t as5600_config = { .scl_speed_hz = I2C_FREQ };   //Configuración Clock de I2C
+
+    esp_err_t rc = as5600_new_sensor(bus_handle, &as5600_config, &as5600_dev);  //Guarda en la variable rc lo que devuelve la creación del sensor
+
+    if (rc != ESP_OK) {
+        ESP_LOGE(ESP_LOGI_TAG, "Error creando sensor AS5600: %s", esp_err_to_name(rc));
+        return;
+    }
+
+    ESP_LOGI(ESP_LOGI_TAG, "AS5600 inicializado correctamente");
+
+    return;
 }
 
 static void pid_init(void)
@@ -602,7 +644,8 @@ void task_BTN_MODO (void *pvParameters)  //Función del boton MODO: Modifica per
 void app_main(void){
 
     GPIO_config();
-    as5600_init();
+    LCD_init();
+    AS5600_init();
     pid_init();
     Usart_config();
     nvs_init();
