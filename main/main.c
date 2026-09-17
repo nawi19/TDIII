@@ -58,6 +58,7 @@
 #define PIN_MODO 42         //DEFINES de botones
 
 static lcd_bus_hd44780_t *LCD1_BUS = NULL;
+static hd44780_t *LCD1 = NULL;
 static i2c_master_bus_handle_t i2c_bus_handle = NULL;
 static as5600_handle_t as5600_dev = NULL;
 static const char *TAG = "MOTOR_ANGULO";
@@ -102,13 +103,19 @@ typedef struct {
     float pid_output;   // solo válido si tipo == MOTOR_CMD_PID
 } motor_cmd_t;
 
+typedef struct {
+    float angulo_actual;
+    float angulo_deseado;
+    int   perfil;
+} lcd_data_t;
+
 //Definición de colas
 
 static QueueHandle_t motor_queue;
 static QueueHandle_t cmd_queue;
 static QueueHandle_t encoder_queue;
 static QueueHandle_t flash_queue;
-
+static QueueHandle_t lcd_queue;
 
 
 /*TaskHandle_t xHandle_BTN_ORIGEN=NULL;
@@ -218,7 +225,7 @@ void LCD_init() //Inicialización del LCD E INICIALIZA EL I2C
 
     if (!LCD1_BUS) return;
 
-    hd44780_t *LCD1 = lcd_init(LCD1_BUS, HD44780_GEOMETRY_20X4, true);
+     LCD1 = lcd_init(LCD1_BUS, HD44780_GEOMETRY_20X4, true);
     if (!LCD1)
     {
         if (LCD1_BUS->destroy) LCD1_BUS->destroy(&LCD1_BUS);
@@ -538,6 +545,13 @@ static void control_task(void *pvParameters)
         printf(">angulo_deseado:%.2f\n", angulo_deseado);
         //printf(">error:%.2f\n", error);
 
+        lcd_data_t lcd_data = {
+            .angulo_actual   = angulo_actual,
+            .angulo_deseado  = angulo_deseado,
+            .perfil          = perfil_actual
+        };
+        xQueueOverwrite(lcd_queue, &lcd_data);
+
         vTaskDelay(pdMS_TO_TICKS(10));
         
     }
@@ -556,6 +570,45 @@ static void flashtask(void *pvParameters){
         }
     }
 
+}
+
+static void LCD_task(void *pvParameters)
+{
+    lcd_data_t data = {0};
+    lcd_data_t data_prev = { .angulo_actual = -9999.0f, .angulo_deseado = -9999.0f, .perfil = -1 };
+    char buf[21];
+
+    while (1) {
+
+        if (xQueuePeek(lcd_queue, &data, pdMS_TO_TICKS(200)) == pdTRUE) {
+
+            // Línea 1: ángulo actual (solo si cambió más de 0.05°)
+            if (fabsf(data.angulo_actual - data_prev.angulo_actual) > 0.05f) {
+                lcd_set_cursor(LCD1, 0, 0);
+                snprintf(buf, sizeof(buf), "Actual : %6.1f deg", data.angulo_actual);
+                lcd_write_str(LCD1, buf);
+                data_prev.angulo_actual = data.angulo_actual;
+            }
+
+            // Línea 2: ángulo deseado
+            if (data.angulo_deseado != data_prev.angulo_deseado) {
+                lcd_set_cursor(LCD1, 0, 1);
+                snprintf(buf, sizeof(buf), "Deseado: %6.1f deg", data.angulo_deseado);
+                lcd_write_str(LCD1, buf);
+                data_prev.angulo_deseado = data.angulo_deseado;
+            }
+
+            // Línea 3: perfil activo
+            if (data.perfil != data_prev.perfil) {
+                lcd_set_cursor(LCD1, 0, 2);
+                snprintf(buf, sizeof(buf), "Perfil : %-11s", perfiles[data.perfil].nombre);
+                lcd_write_str(LCD1, buf);
+                data_prev.perfil = data.perfil;
+            }
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(150));
+    }
 }
 
 //Interrupciones de botones
@@ -670,6 +723,11 @@ void app_main(void){
         ESP_LOGE(TAG, "No se pudo crear flash_queue");
     }   
 
+    lcd_queue = xQueueCreate(1, sizeof(lcd_data_t));
+    if (lcd_queue == NULL) {
+        ESP_LOGE(TAG, "No se pudo crear lcd_queue");
+    }
+
     angulo_deseado = cargar_angulo_deseado();
 
     xTaskCreate(control_task, "control_task", 4096, NULL, 5, NULL);
@@ -677,6 +735,7 @@ void app_main(void){
     xTaskCreate(motor_task, "motor_task", 4096, NULL, 5, NULL);
     xTaskCreate(Encoder_task, "Encoder_task", 4096, NULL, 5, NULL);
     xTaskCreate(flashtask, "flashtask", 4096, NULL, 2, NULL);
+    xTaskCreate(LCD_task, "LCD_task", 4096, NULL, 2, NULL);
 
     //tareas de los botones 
 
