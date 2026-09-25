@@ -52,6 +52,12 @@
 #define PIN_STOP 41         //DEFINES de botones
 #define PIN_MODO 42         //DEFINES de botones
 
+#define NUM_PERFILES 3
+
+#define PID_KP   4.5f
+#define PID_KI   0.2f
+#define PID_KD   1.7f
+
 static i2c_master_bus_handle_t i2c_bus_handle = NULL;
 static as5600_handle_t as5600_dev = NULL;
 static const char *TAG = "MOTOR_ANGULO";
@@ -64,18 +70,18 @@ void isr_BTN_MODO(void *arg);               //INTERRUPCIONES DE BOTONES
 */
 
 //Estructura con las ganancias y perfiles del PID
-typedef struct {
-    const char *nombre;
-    float kp;
-    float ki;
-    float kd;
-} perfil_pid_t;
+typedef enum {
+    PERFIL_ESCALON = 0,
+    PERFIL_RAMPA_LINEAL = 1,
+    PERFIL_RAMPA_CUADRATICA = 2,
+} tipo_perfil_t;
 
-static const perfil_pid_t perfiles[] = {
-    [0] = { .nombre = "LENTO",  .kp = 4.5f, .ki = 0.2f, .kd = 1.7f },
-    [1] = { .nombre = "RAPIDO", .kp = 9.0f, .ki = 0.2f, .kd = 3.0f },
-};
-#define NUM_PERFILES (sizeof(perfiles)/sizeof(perfiles[0]))
+static const char *nombres_perfiles[NUM_PERFILES] = { "ESCALON", "LINEAL", "CUADRATICA" };
+
+
+#define VELOCIDAD_RAMPA_DEG_S   60.0f
+
+#define CONTROL_PERIOD_S   0.01f 
 
 //Estructura para mandar por cola hacia el UART
 typedef enum { CMD_ANGULO, CMD_PERFIL } cmd_type_t;
@@ -226,20 +232,16 @@ uart_config_t uart_config = {
 static void pid_init(void)
 {
     pid_ctrl_parameter_f_t pid_params = {
-        .kp = perfiles[perfil_actual].kp,
-        .ki = perfiles[perfil_actual].ki,
-        .kd = perfiles[perfil_actual].kd,
+        .kp = PID_KP,
+        .ki = PID_KI,
+        .kd = PID_KD,
         .max_output = LEDC_DUTY_MAX,
         .min_output = -LEDC_DUTY_MAX,
-        .max_integral = LEDC_DUTY_MAX,   // anti-windup
-        .min_integral = -LEDC_DUTY_MAX,  // anti-windup
+        .max_integral = LEDC_DUTY_MAX,
+        .min_integral = -LEDC_DUTY_MAX,
         .cal_type = PID_CAL_TYPE_POSITIONAL,
     };
- 
-    pid_ctrl_config_f_t pid_config = {
-        .init_param = pid_params,
-    };
- 
+    pid_ctrl_config_f_t pid_config = { .init_param = pid_params };
     ESP_ERROR_CHECK(pid_new_control_block_f(&pid_config, &pid_ctrl));
 }
 
@@ -380,7 +382,7 @@ static void uart_task(void *pvParameters)
     int line_pos = 0; //posicion actual en el buffer de linea
  
     char InitMsg[] = "Ingrese el angulo deseado (entre -360 y 360 grados) seguido de Enter.\r\n"
-                  "Ingrese P1 (lento) o P2 (rapido) para cambiar el perfil de movimiento.\r\n";
+              "Ingrese P1 (escalon), P2 (rampa lineal) o P3 (rampa cuadratica).\r\n";
     uart_write_bytes(UART_PORT, InitMsg, strlen(InitMsg));
  
     while (1) {
@@ -395,7 +397,7 @@ static void uart_task(void *pvParameters)
                         line_buf[line_pos] = '\0';
  
                          if (line_pos >= 2 && line_buf[0] == 'P' &&
-                            (line_buf[1] == '1' || line_buf[1] == '2')) {
+                            (line_buf[1] >= '1' && line_buf[1] <= '3')) {
 
                             uart_cmd_t cmd = { .tipo = CMD_PERFIL, .perfil = line_buf[1] - '1' };
                             xQueueSend(cmd_queue, &cmd, 0);
@@ -441,34 +443,47 @@ static void uart_task(void *pvParameters)
 static void control_task(void *pvParameters)
 {
 
-    float angulo_actual = 0.0f;
+     float angulo_actual = 0.0f;
     float pid_output = 0.0f;
+
+    // --- Estado del generador de trayectoria ---
+    static float trayectoria_inicio   = 0.0f;
+    static float trayectoria_final    = 0.0f;
+    static float trayectoria_duracion = 0.0f; // segundos
+    static float trayectoria_tiempo   = 0.0f; // segundos
+    static bool  trayectoria_activa   = false;
+    static float setpoint_actual      = 0.0f; // lo que realmente persigue el PID
 
     while (1) {
 
         // --- Procesar comandos pendientes de UART (angulo o perfil) ---
         uart_cmd_t cmd;
-        while (xQueueReceive(cmd_queue, &cmd, 0) == pdTRUE) {
+                while (xQueueReceive(cmd_queue, &cmd, 0) == pdTRUE) {
             if (cmd.tipo == CMD_ANGULO) {
-                angulo_deseado = cmd.angulo;
+                angulo_deseado = cmd.angulo; // destino final (para LCD/NVS)
+
+                float distancia = normalizar_error_angular(cmd.angulo - setpoint_actual);
+                trayectoria_inicio = setpoint_actual;
+                trayectoria_final  = setpoint_actual + distancia; // camino corto, sin problemas de wrap
+
+                if (perfil_actual == PERFIL_ESCALON) {
+                    trayectoria_duracion = 0.0f;
+                } else {
+                    trayectoria_duracion = fabsf(distancia) / VELOCIDAD_RAMPA_DEG_S;
+                    if (trayectoria_duracion < CONTROL_PERIOD_S) {
+                        trayectoria_duracion = CONTROL_PERIOD_S;
+                    }
+                }
+                trayectoria_tiempo = 0.0f;
+                trayectoria_activa = true;
+
                 float angulo_deseado_flash = angulo_deseado;
-                xQueueOverwrite(flash_queue, &angulo_deseado_flash); // Guardar en NVS
+                xQueueOverwrite(flash_queue, &angulo_deseado_flash);
+
             } else if (cmd.tipo == CMD_PERFIL && cmd.perfil < NUM_PERFILES) {
                 perfil_actual = cmd.perfil;
-
-                pid_ctrl_parameter_f_t nuevos_params = {
-                    .kp = perfiles[perfil_actual].kp,
-                    .ki = perfiles[perfil_actual].ki,
-                    .kd = perfiles[perfil_actual].kd,
-                    .max_output = LEDC_DUTY_MAX,
-                    .min_output = -LEDC_DUTY_MAX,
-                    .max_integral = LEDC_DUTY_MAX,
-                    .min_integral = -LEDC_DUTY_MAX,
-                    .cal_type = PID_CAL_TYPE_POSITIONAL,
-                };
-                ESP_ERROR_CHECK(pid_update_parameters_f(pid_ctrl, &nuevos_params));
-                pid_reset_ctrl_block_f(pid_ctrl);
-                ESP_LOGI(TAG, "Perfil cambiado a: %s", perfiles[perfil_actual].nombre);
+                ESP_LOGI(TAG, "Perfil cambiado a: %s", nombres_perfiles[perfil_actual]);
+                // ya no hay que tocar el PID acá
             }
         }
 
@@ -476,7 +491,33 @@ static void control_task(void *pvParameters)
         ESP_LOGW(TAG, "Sin dato de encoder, usando ultimo valor: %.2f", angulo_actual);
     }
 
-        float error = angulo_deseado - angulo_actual;
+    // --- Actualizar setpoint según el perfil de trayectoria ---
+        if (trayectoria_activa) {
+            if (perfil_actual == PERFIL_ESCALON || trayectoria_duracion <= 0.0f) {
+                setpoint_actual = trayectoria_final;
+                trayectoria_activa = false;
+            } else {
+                trayectoria_tiempo += CONTROL_PERIOD_S;
+                float tau = trayectoria_tiempo / trayectoria_duracion;
+                if (tau >= 1.0f) {
+                    tau = 1.0f;
+                    trayectoria_activa = false;
+                }
+
+                float fraccion;
+                if (perfil_actual == PERFIL_RAMPA_LINEAL) {
+                    fraccion = tau;
+                } else { // PERFIL_RAMPA_CUADRATICA
+                    fraccion = (tau < 0.5f)
+                        ? 2.0f * tau * tau
+                        : 1.0f - 2.0f * (1.0f - tau) * (1.0f - tau);
+                }
+                setpoint_actual = trayectoria_inicio + fraccion * (trayectoria_final - trayectoria_inicio);
+            }
+        }
+
+
+        float error = setpoint_actual - angulo_actual; 
         error = normalizar_error_angular(error);
 
          if (fabsf(error) < ERROR_DEADBAND_DEG) {

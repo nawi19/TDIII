@@ -33,5 +33,6 @@
     "--query-driver=**",
     "--compile-commands-dir=c:\\Users\\nahue\\OneDrive\\Escritorio\\EGA\\EGA\\build"
   ],
-  "idf.flashType": "UART"
+  "idf.flashType": "UART",
+  "idf.port": "COM4"
 }
