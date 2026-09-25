@@ -442,8 +442,7 @@ static void uart_task(void *pvParameters)
 
 static void control_task(void *pvParameters)
 {
-
-     float angulo_actual = 0.0f;
+    float angulo_actual = 0.0f;
     float pid_output = 0.0f;
 
     // --- Estado del generador de trayectoria ---
@@ -458,7 +457,7 @@ static void control_task(void *pvParameters)
 
         // --- Procesar comandos pendientes de UART (angulo o perfil) ---
         uart_cmd_t cmd;
-                while (xQueueReceive(cmd_queue, &cmd, 0) == pdTRUE) {
+        while (xQueueReceive(cmd_queue, &cmd, 0) == pdTRUE) {
             if (cmd.tipo == CMD_ANGULO) {
                 angulo_deseado = cmd.angulo; // destino final (para LCD/NVS)
 
@@ -488,10 +487,10 @@ static void control_task(void *pvParameters)
         }
 
         if (xQueuePeek(encoder_queue, &angulo_actual, 0) != pdTRUE) {
-        ESP_LOGW(TAG, "Sin dato de encoder, usando ultimo valor: %.2f", angulo_actual);
-    }
+            ESP_LOGW(TAG, "Sin dato de encoder, usando ultimo valor: %.2f", angulo_actual);
+        }
 
-    // --- Actualizar setpoint según el perfil de trayectoria ---
+        // --- Actualizar setpoint según el perfil de trayectoria ---
         if (trayectoria_activa) {
             if (perfil_actual == PERFIL_ESCALON || trayectoria_duracion <= 0.0f) {
                 setpoint_actual = trayectoria_final;
@@ -516,11 +515,12 @@ static void control_task(void *pvParameters)
             }
         }
 
-
-        float error = setpoint_actual - angulo_actual; 
+        // --- Error contra el setpoint de la trayectoria, no contra el destino final ---
+        float error = setpoint_actual - angulo_actual;
         error = normalizar_error_angular(error);
 
-         if (fabsf(error) < ERROR_DEADBAND_DEG) {
+        // --- Deadband y reset del PID solo si la trayectoria ya terminó ---
+        if (fabsf(error) < ERROR_DEADBAND_DEG && !trayectoria_activa) {
             motor_cmd_t cmd = { .tipo = MOTOR_CMD_STOP };
             xQueueSend(motor_queue, &cmd, 0);
             pid_reset_ctrl_block_f(pid_ctrl);
@@ -529,8 +529,9 @@ static void control_task(void *pvParameters)
             motor_cmd_t cmd = { .tipo = MOTOR_CMD_PID, .pid_output = pid_output };
             xQueueSend(motor_queue, &cmd, 0);
         }
-  
-        ESP_LOGI(TAG, "Angulo actual: %.2f | deseado: %.2f | error: %.2f | salida PID: %.2f", angulo_actual, angulo_deseado, error, pid_output);
+
+        ESP_LOGI(TAG, "Angulo actual: %.2f | deseado: %.2f | error: %.2f | salida PID: %.2f",
+                 angulo_actual, angulo_deseado, error, pid_output);
 
         // Lineas adicionales solo para Teleplot (no usan el prefijo de ESP_LOG)
         printf(">angulo_actual:%.2f\n", angulo_actual);
@@ -538,7 +539,6 @@ static void control_task(void *pvParameters)
         //printf(">error:%.2f\n", error);
 
         vTaskDelay(pdMS_TO_TICKS(10));
-        
     }
 }
 
