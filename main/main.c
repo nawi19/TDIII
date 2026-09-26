@@ -453,6 +453,12 @@ static void control_task(void *pvParameters)
     static bool  trayectoria_activa   = false;
     static float setpoint_actual      = 0.0f; // lo que realmente persigue el PID
 
+     // --- Inicializar el setpoint con el ángulo recuperado de NVS ---
+    setpoint_actual      = angulo_deseado;
+    trayectoria_inicio   = angulo_deseado;
+    trayectoria_final    = angulo_deseado;
+    trayectoria_activa   = false;
+    
     while (1) {
 
         // --- Procesar comandos pendientes de UART (angulo o perfil) ---
