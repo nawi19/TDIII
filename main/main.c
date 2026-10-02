@@ -10,7 +10,7 @@ En la terminal:
     get: (enter). Me devuelve el angulo actual del eje.
     exec: ram (enter) o esc (enter). Cambio entre escalon y rampa. 
 
-HOLA NAHHUIII 17:18
+HOLA NAHHUIII 20:43
 */
 
 #include <stdio.h>
@@ -127,15 +127,15 @@ QueueHandle_t queue_pid_uart;
 QueueHandle_t queue_pid_lcd;
 QueueHandle_t queue_pid_flash;
 
-bool activo=0;  //Indica si el PID se encuentra activo o no
+volatile bool activo=1;  //Indica si el PID se encuentra activo o no
 volatile bool rebote=0; //Implementación de antirrebote
-bool lectura_flash=0;
-bool ISR_on=0;
+volatile bool lectura_flash=0;
+volatile bool ISR_on=0;
 
-bool origen=0;      //VARIABLES DE BOTONES
-bool start=0;       //VARIABLES DE BOTONES
-bool stop=0;        //VARIABLES DE BOTONES
-bool modo=0;        //VARIABLES DE BOTONES   0:escalon 1:rampa
+volatile bool origen=0;      //VARIABLES DE BOTONES
+volatile bool start=0;       //VARIABLES DE BOTONES
+volatile bool stop=0;        //VARIABLES DE BOTONES
+volatile bool modo=0;        //VARIABLES DE BOTONES   0:escalon 1:rampa
 
 volatile int OBS_detect=0;
 volatile bool OBS_flag=0;
@@ -145,9 +145,9 @@ float angulo_actual;
 float angulo_deseado;
 float PID_output=0.0f;
 
-float PID_KP=0.55f;       //CONSTANTE PID
-float PID_KI=0.00f;       //CONSTANTE PID
-float PID_KD=0.14f;       //CONSTANTE PID
+float PID_KP=1.7f;       //CONSTANTE PID
+float PID_KI=0.2f;       //CONSTANTE PID
+float PID_KD=3.5f;       //CONSTANTE PID
 
 typedef struct {
     float angulo_actual_uart;
@@ -223,8 +223,6 @@ void task_flash(void *pvParameters);
 
 void app_main(void)
 {
-    ISR_on=0;
-
     flash_init ();
     angulo_deseado=leer_flash();
     GPIO_init();
@@ -236,7 +234,7 @@ void app_main(void)
     
     create_queue();
     create_task();
-     
+
 }
 
 //--------------------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -326,8 +324,7 @@ void LCD_init() //Inicialización del LCD E INICIALIZA EL I2C
     lcd_write_str(LCD1, "Estado : ");   //tengo que escribirlo en 10,2
 
     lcd_set_cursor(LCD1, 0, 3);
-    lcd_write_str(LCD1, "Perfil : ");    //tengo que escribirlo en 10,3
-
+    lcd_write_str(LCD1, "Perfil : ");    //tengo que escribirlo en 10,3 
 }
 
 void AS5600_init()  //Inicialización del encoder AS5600
@@ -507,9 +504,9 @@ void task_PID (void *pvParameters)  //CALCULA el PID que se debe aplicar. Muestr
         pid_data datos_uart;
 
         if (xQueueReceive(queue_uart_pid, &datos_uart, 0) == pdTRUE) {
-            angulo_deseado = datos_uart.angulo_deseado_pid;
+            if (datos_uart.angulo_deseado_pid>=0.0f) angulo_deseado = datos_uart.angulo_deseado_pid;
+            if (datos_uart.perfil_pid>=0.0f) modo=datos_uart.perfil_pid;
             xQueueSend(queue_pid_flash, &angulo_deseado, 0);
-            modo = datos_uart.perfil_pid;
         }
 
         if (!activo){
@@ -563,7 +560,7 @@ void task_H_controller(float pid_output) //Aplica la respuesta PID necesaria al 
     ang_prev=angulo_actual;
 
     if (OBS_detect>50){
-        //OBS_flag=1;
+        OBS_flag=1;
         OBS_dir=(pid_output>0.0f) ? -1 : 1;   // el sentido contrario al que se trabó
         OBS_detect = 0;
     }
@@ -598,6 +595,11 @@ void task_UART(void *pvParameters)
     int pos = 0; //posicion actual en el buffer de linea
 
     pid_data datos;
+    
+    datos.angulo_actual_pid=-1;
+    datos.angulo_deseado_pid=-1;
+    datos.perfil_pid=-1;
+    datos.estado_pid=-1;
     
     while (1) {
 
@@ -700,7 +702,7 @@ void lectura_datos_uart(const char *buffer, pid_data *datos){
             const char *err = "ERR: fuera de rango\r\n";
             uart_write_bytes(UART_PORT, err, strlen(err));
 
-        } else{  //EL ANGULO ES VALIDO  
+        } else{                                                 //EL ANGULO ES VALIDO  
             datos->angulo_deseado_pid=angulo_recibido;        
             xQueueSend(queue_pid_flash,&angulo_deseado,0);
         } 
@@ -768,6 +770,8 @@ void pid_rampa(){
 
     pid_actualizar (15.0f, 0.0f, 0.1f);
 
+    //pid_actualizar (PID_KP, PID_KI, PID_KD);
+
     esp_err_t err = as5600_get_angle_degrees(as5600_dev, &angulo_actual);    //Lee angulo del encoder
     if (err != ESP_OK) ESP_LOGE(ESP_LOGI_TAG, "Error leyendo AS5600: %s", esp_err_to_name(err)); //Detecta si hay error en la lectura del ángulo
 
@@ -823,79 +827,59 @@ float leer_flash()    //Función para TOMAR el ángulo deseado de FLASH
 //--------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 
-void IRAM_ATTR isr_BTN_ORIGEN(void *arg)    //Interrupción de boton ORIGEN
+static void IRAM_ATTR notificar_boton(TaskHandle_t h)
 {
-    if (!rebote){
+    if(!rebote&&h!=NULL){
         rebote=1;
-        xTaskResumeFromISR(xHandle_BTN_ORIGEN);
+        BaseType_t hp=pdFALSE;
+        vTaskNotifyGiveFromISR(h,&hp);
+        portYIELD_FROM_ISR(hp);
     }
-    return;
 }
 
-void IRAM_ATTR isr_BTN_START(void *arg)     //Interrupción de boton START / PIDE UN ANGULO DESEADO
-{   
-    if (!rebote){
-        rebote=1;
-        xTaskResumeFromISR(xHandle_BTN_START);
+void IRAM_ATTR isr_BTN_ORIGEN(void *arg){   notificar_boton(xHandle_BTN_ORIGEN); }
+void IRAM_ATTR isr_BTN_START(void *arg) {    notificar_boton(xHandle_BTN_START); }
+void IRAM_ATTR isr_BTN_STOP(void *arg)  {     notificar_boton(xHandle_BTN_STOP); }
+void IRAM_ATTR isr_BTN_MODO(void *arg)  {     notificar_boton(xHandle_BTN_MODO); }
+
+void task_BTN_ORIGEN(void *pvParameters)
+{
+    while(1){
+        ulTaskNotifyTake(pdTRUE,portMAX_DELAY);
+        angulo_deseado=0.0f;
+        xQueueSend(queue_pid_flash,&angulo_deseado,0);
+        vTaskDelay(pdMS_TO_TICKS(1000));    //antirrebote
+        rebote=0;
     }
-    return;
 }
 
-void IRAM_ATTR isr_BTN_STOP(void *arg)      //Interrupción de boton STOP/ calibrar CERO
+void task_BTN_START(void *pvParameters)
 {
-    if (!rebote){
-        rebote=1;
-        xTaskResumeFromISR(xHandle_BTN_STOP);
-    }
-    return;
-}
-
-void IRAM_ATTR isr_BTN_MODO(void *arg)      //Interrupción de boton MODO 
-{
-    if (!rebote){
-        rebote=1;
-        xTaskResumeFromISR(xHandle_BTN_MODO);
-    }
-    return;
-}
-
-void task_BTN_ORIGEN (void *pvParameters)  //Función del boton ORIGEN
-{
-    while (1){
-        angulo_deseado=0.0;
+    while(1){
+        ulTaskNotifyTake(pdTRUE,portMAX_DELAY);
+        activo=!activo;
         vTaskDelay(pdMS_TO_TICKS(1000));
         rebote=0;
-        vTaskSuspend(NULL);
     }
 }
 
-void task_BTN_START (void *pvParameters)  //Función del boton START:
+void task_BTN_STOP(void *pvParameters)
 {
-    while (1){
-        activo=!activo;
-        vTaskDelay(pdMS_TO_TICKS(1000)); //para antirrebote
-        rebote=0;
-        vTaskSuspend(NULL);
-    }
-}
-
-void task_BTN_STOP (void *pvParameters)  //Cambia el angulo deseado a la posición actual del eje
-{
-    while (1){
-        as5600_get_angle_degrees(as5600_dev, &angulo_deseado);
+    while(1){
+        ulTaskNotifyTake(pdTRUE,portMAX_DELAY);
+        as5600_get_angle_degrees(as5600_dev,&angulo_deseado);
         xQueueSend(queue_pid_flash,&angulo_deseado,0);
         vTaskDelay(pdMS_TO_TICKS(1000));
         rebote=0;
-        vTaskSuspend(NULL);
     }
 }
 
-void task_BTN_MODO (void *pvParameters)  //Función del boton MODO: Modifica perfiles mediante los coeficientes PID
+void task_BTN_MODO(void *pvParameters)
 {
-    while (1){
+    while(1){
+        ulTaskNotifyTake(pdTRUE,portMAX_DELAY);
         modo=!modo;
         vTaskDelay(pdMS_TO_TICKS(1000));
         rebote=0;
-        vTaskSuspend(NULL);
     }
 }
