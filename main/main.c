@@ -1,11 +1,13 @@
 /*
 
 Boton ORIGEN:   El motor va a 0°: el angulo deseado es 0°
-Boton START:    Empieza a funcionar el PID. Si se aprieta con el motor en determinada posición, lo toma como origen=0°
+Boton START:    ON/OFF del PID (con PID apagado, el motor no tiene fuerza). 
 Boton STOP:     El motor FRENA en el angulo actual. El angulo deseado=angulo actual
-Boton MODO:     Cambia los perfiles, cambiando los coeficientes PID
+Boton MODO:     Cambia los perfiles, entre RAMPA y ESCALON
 
-La librería del AS5600 esta mod
+
+
+HOLA NAHHUIII 2/10/26
 */
 
 #include <stdio.h>
