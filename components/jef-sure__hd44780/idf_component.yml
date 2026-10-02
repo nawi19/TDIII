@@ -1,0 +1,39 @@
+dependencies:
+  idf: '>=5.0'
+description: ESP-IDF HD44780 character LCD driver with PCF8574 I2C backpack, GPIO
+  4-bit, and GPIO 8-bit backends.
+documentation: https://github.com/jef-sure/esp32-component-hd44780/blob/main/README.md
+files:
+  exclude:
+  - build/**
+  - dist/**
+  - .git/**
+  - .vscode/**
+  - '**/*.old'
+  - '**/*.bak'
+  - '**/*.tmp'
+  include:
+  - src/**/*.c
+  - include/**/*.h
+  - CMakeLists.txt
+  - examples/**/*.c
+  - examples/**/*.h
+  - examples/**/*.md
+  - examples/**/CMakeLists.txt
+  - README.md
+  - LICENSE
+issues: https://github.com/jef-sure/esp32-component-hd44780/issues
+license: MIT
+maintainers:
+- Anton Petrusevich <anton.petrusevich.mobile@gmail.com>
+repository: https://github.com/jef-sure/esp32-component-hd44780.git
+tags:
+- hd44780
+- lcd
+- display
+- character-lcd
+- i2c
+- pcf8574
+- gpio
+url: https://github.com/jef-sure/esp32-component-hd44780
+version: 0.0.1

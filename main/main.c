@@ -11,6 +11,7 @@ La librería del AS5600 esta mod
 #include <stdio.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 #include <stddef.h>
 #include <math.h>
@@ -24,14 +25,20 @@ La librería del AS5600 esta mod
 
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
+#include "driver/i2c.h"
 #include "driver/ledc.h"
+#include "driver/uart.h"
+#include "nvs_flash.h"
+#include "nvs.h"
 
 #include "hd44780.h"
 #include "as5600.h"
-#include "pid_ctrl.h"
+#include "pid_ctrl.h"   
+
 //--------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 //--------------------------------------------------DEFINICIONES -----------------------------------------------------------------------------------------------------------
 //--------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
 #define I2C_MASTER_NUM I2C_NUM_0
 #define I2C_FREQ 100000     
 #define LCD_DIR 0x27
@@ -48,29 +55,34 @@ La librería del AS5600 esta mod
 #define L298N_IN2   8       //PINES Puente H   
 #define L298N_ENA   18       //PINES Puente H  
 
-#define PID_KP  5.5f        //CONSTANTE PID
-#define PID_KI  0.3f        //CONSTANTE PID
-#define PID_KD  12.0f        //CONSTANTE PID
-
 #define LEDC_TIMER      LEDC_TIMER_0
 #define LEDC_MODE       LEDC_LOW_SPEED_MODE
 #define LEDC_CHANNEL    LEDC_CHANNEL_0
 #define LEDC_DUTY_RES   LEDC_TIMER_10_BIT   // 0-1023
 #define LEDC_FREQUENCY  100             
 #define LEDC_DUTY_MAX   1023.0f
-#define LEDC_DUTY_OBS   600.0f      //Para la implementación de detección de obstaculos     
+#define LEDC_DUTY_OBS   70.0f      //Para la implementación de detección de obstaculos     
 
-#define MOTOR_MIN_DUTY  100.0f
-#define BANDA_ERROR     1.0f
+#define MOTOR_MIN_DUTY  85.0f
+#define BANDA_ERROR     2.0f
 #define PID_time        10                        
-
-#define LED_1 11
-#define LED_2 12
 
 #define STACK_SIZE_LED_blink 2048*2
 #define STACK_SIZE_LCD_controller 2048*2
 #define STACK_SIZE_encoder_controller 2048*2
 #define STACK_SIZE_PID 2048*2
+#define STACK_SIZE_UART 2048*2
+
+#define UART_PORT      UART_NUM_1
+#define TXD_PIN        (GPIO_NUM_45)
+#define RXD_PIN        (GPIO_NUM_0)
+#define BUF_SIZE       1024
+#define UART_LINE_BUF_SIZE 64
+
+#define RESOLUCION_RAMPA 5  //Grados del paso de la rampa
+
+#define NVS_NAMESPACE   "motor_cfg"
+#define NVS_KEY_ANGULO  "angulo_des"
 
 //--------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 //--------------------------------------------------DECLARACION DE VARIABLES------------------------------------------------------------------------------------------------
@@ -78,40 +90,82 @@ La librería del AS5600 esta mod
 
 char *ESP_LOGI_TAG = "ESP-FB";      //TAG del ESP-LOGI
 
+gpio_config_t BOTONERA_io_conf;
+gpio_config_t L298N_io_conf;
+
 static lcd_bus_hd44780_t *LCD1_BUS = NULL;
 static pid_ctrl_block_handle_f_t pid_ctrl = NULL;
 static as5600_handle_t as5600_dev = NULL;
 
 static uint8_t ucParameterToPass;
 
+pid_ctrl_parameter_f_t pid_params;
+
+pid_ctrl_config_f_t pid_config;
+
+hd44780_t *LCD1;
+
 TaskHandle_t xHandle_LED=NULL;
 TaskHandle_t xHandle_LCD=NULL;
 TaskHandle_t xHandle_encoder=NULL;
 TaskHandle_t xHandle_PID=NULL;
+TaskHandle_t xHandle_UART=NULL;
+TaskHandle_t xHandle_flash=NULL;
 
 TaskHandle_t xHandle_BTN_ORIGEN=NULL;
 TaskHandle_t xHandle_BTN_START=NULL;
 TaskHandle_t xHandle_BTN_STOP=NULL;
 TaskHandle_t xHandle_BTN_MODO=NULL;
 
-QueueHandle_t queue_I2C_LCD;
+QueueHandle_t queue_uart_pid;
+QueueHandle_t queue_pid_uart;
+QueueHandle_t queue_pid_lcd;
+QueueHandle_t queue_pid_flash;
 
-bool led1=0;
-bool led2=0;
 bool activo=0;  //Indica si el PID se encuentra activo o no
 volatile bool rebote=0; //Implementación de antirrebote
+bool lectura_flash=0;
+bool ISR_on=0;
 
 bool origen=0;      //VARIABLES DE BOTONES
 bool start=0;       //VARIABLES DE BOTONES
 bool stop=0;        //VARIABLES DE BOTONES
-bool modo=0;        //VARIABLES DE BOTONES
+bool modo=0;        //VARIABLES DE BOTONES   0:escalon 1:rampa
 
 int OBS_detect=0;
 bool OBS_flag=0;
 
-float angulo_actual = 0.0f;
-float angulo_deseado = 0.0f;
-float PID_output = 0.0f;
+float angulo_actual;
+float angulo_deseado;
+float PID_output=0.0f;
+
+float PID_KP=1.0    ;       //CONSTANTE PID
+float PID_KI;       //CONSTANTE PID
+float PID_KD;       //CONSTANTE PID
+
+typedef struct {
+    float angulo_actual_uart;
+    float angulo_deseado_uart;
+    int perfil_uart;       
+    int estado_uart;  
+} uart_data;
+
+typedef struct {
+    float angulo_actual_lcd;
+    float angulo_deseado_lcd;
+    int perfil_lcd;       
+    int estado_lcd;  
+} lcd_data;
+
+typedef struct {
+    float angulo_actual_pid;
+    float angulo_deseado_pid;
+    int perfil_pid;       
+    int estado_pid;  
+} pid_data;
+
+float angulo_deseado_flash;
+
 
 //--------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 //--------------------------------------------------DECLARACION DE FUNCIONES------------------------------------------------------------------------------------------------
@@ -122,15 +176,20 @@ void LCD_init();
 void AS5600_init();
 void PID_init ();
 void PWM_init ();
+void UART_init();
+void flash_init ();
+void ISR_init ();
 
-void LED_blink();
 void create_task();
 void create_queue();
 
-void MOTOR_stop ();
+void motor_stop ();
 float normalizar_error(float error);
-void task_H_controller(float pid_output);
-void task_current_sens ();
+void pid_escalon ();
+void pid_rampa();
+void lectura_datos_uart(const char *buffer, pid_data *datos);
+void pid_actualizar (float PID_KP, float PID_KI,float PID_KD);
+float leer_flash();
 
 void task_I2C_guard ();
 
@@ -143,25 +202,35 @@ void task_BTN_STOP (void *pvParameters);
 void isr_BTN_MODO(void *arg);               //INTERRUPCIONES DE BOTONES
 void task_BTN_MODO (void *pvParameters);
 
-void vTaskl_LED_blink(void *pvParameters);
+void task_H_controller(float pid_output);
+void task_current_sens ();
+
 void task_LCD_controller(void *pvParameters);
 void task_encoder_controller(void *pvParameters);
 void task_PID(void *pvParameters);
+void task_UART(void *pvParameters);
+void task_flash(void *pvParameters);
 
 //--------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-//--------------------------------------------------------MAIN--------------------------------------------------------------------------------------------------------------
+//------------------------------------------------------------MAIN----------------------------------------------------------------------------------------------------------
 //--------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 void app_main(void)
 {
+    ISR_on=0;
+
+    flash_init ();
+    angulo_deseado=leer_flash();
     GPIO_init();
     LCD_init();     //LLAMAR PRIMERO A LCD_init antes que a AS5600_init
     AS5600_init ();
     PID_init();
     PWM_init();
-
+    UART_init();
+    
     create_queue();
     create_task();
+     
 }
 
 //--------------------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -170,22 +239,20 @@ void app_main(void)
 
 void GPIO_init() //Inicialización de GPIO
 {
-    gpio_config_t BOTONERA_io_conf = {       //CONFIGURACION GPIO DE LOS PINES DE BOTONERA
-        .pin_bit_mask = (1ULL << PIN_ORIGEN | 1ULL << PIN_START | 1ULL << PIN_STOP | 1ULL << PIN_MODO),
-        .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_ENABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_NEGEDGE,
-    };
+    //CONFIGURACION GPIO DE LOS PINES DE BOTONERA
+    BOTONERA_io_conf.pin_bit_mask = (1ULL << PIN_ORIGEN | 1ULL << PIN_START | 1ULL << PIN_STOP | 1ULL << PIN_MODO),
+    BOTONERA_io_conf.mode = GPIO_MODE_INPUT,
+    BOTONERA_io_conf.pull_up_en = GPIO_PULLUP_ENABLE,
+    BOTONERA_io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE,
+    BOTONERA_io_conf.intr_type = GPIO_INTR_NEGEDGE,
 
-        gpio_config_t L298N_io_conf = {   //CONFIGURACIÓN GPIO DE LOS PINES DE L298N
-        .pin_bit_mask = (1ULL << L298N_IN1) | (1ULL << L298N_IN2),
-        .mode = GPIO_MODE_OUTPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
-    };
-  
+    //CONFIGURACIÓN GPIO DE LOS PINES DE L298N
+    L298N_io_conf.pin_bit_mask = (1ULL << L298N_IN1) | (1ULL << L298N_IN2),
+    L298N_io_conf.mode = GPIO_MODE_OUTPUT,
+    L298N_io_conf.pull_up_en = GPIO_PULLUP_DISABLE,
+    L298N_io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE,
+    L298N_io_conf.intr_type = GPIO_INTR_DISABLE,
+
     gpio_config(&BOTONERA_io_conf);
     gpio_config(&L298N_io_conf);
 
@@ -203,12 +270,6 @@ void GPIO_init() //Inicialización de GPIO
     gpio_config(&L298N_io_conf);
 
 
-    gpio_reset_pin(LED_1);
-    gpio_set_direction(LED_1, GPIO_MODE_OUTPUT);
-
-    gpio_reset_pin(LED_2);
-    gpio_set_direction(LED_2, GPIO_MODE_OUTPUT);
-
     return;
 }
 
@@ -223,7 +284,7 @@ void LCD_init() //Inicialización del LCD E INICIALIZA EL I2C
 
     if (!LCD1_BUS) return;
 
-    hd44780_t *LCD1 = lcd_init(LCD1_BUS, HD44780_GEOMETRY_20X4, true);
+    LCD1=lcd_init(LCD1_BUS, HD44780_GEOMETRY_20X4, true);
     if (!LCD1)
     {
         if (LCD1_BUS->destroy) LCD1_BUS->destroy(&LCD1_BUS);
@@ -244,6 +305,23 @@ void LCD_init() //Inicialización del LCD E INICIALIZA EL I2C
 
     lcd_set_cursor(LCD1, 0, 3);
     lcd_write_str(LCD1, "    Control  PID    ");
+
+    vTaskDelay (pdMS_TO_TICKS(2000));
+
+    lcd_clear_screen(LCD1);
+
+    lcd_set_cursor(LCD1, 0, 0);
+    lcd_write_str(LCD1, "Actual : ");   //tengo que escribirlo en 10,0
+
+    lcd_set_cursor(LCD1, 0, 1);
+    lcd_write_str(LCD1, "Deseado: ");   //tengo que escribirlo en 10,1
+
+    lcd_set_cursor(LCD1, 0, 2);
+    lcd_write_str(LCD1, "Estado : ");   //tengo que escribirlo en 10,2
+
+    lcd_set_cursor(LCD1, 0, 3);
+    lcd_write_str(LCD1, "Perfil : ");    //tengo que escribirlo en 10,3
+
 }
 
 void AS5600_init()  //Inicialización del encoder AS5600
@@ -298,18 +376,16 @@ void PWM_init (){   //Inicialización del PWM (mediante la librería LEDC)
 
 void PID_init ()    //Inicialización del control PID. Se utiliza la librería pid_ctrl
 {
-    pid_ctrl_parameter_f_t pid_params = {   //Defino todos los parámetros del PID
-        .kp = PID_KP,
-        .ki = PID_KI,
-        .kd = PID_KD,
-        .max_output = LEDC_DUTY_MAX,
-        .min_output = -LEDC_DUTY_MAX,
-        .max_integral = LEDC_DUTY_MAX,   // anti-windup
-        .min_integral = -LEDC_DUTY_MAX,  // anti-windup
-        .cal_type = PID_CAL_TYPE_POSITIONAL,
-    };
+    pid_params.kp = PID_KP,
+    pid_params.ki = PID_KI,
+    pid_params.kd = PID_KD,
+    pid_params.max_output = LEDC_DUTY_MAX,
+    pid_params.min_output = -LEDC_DUTY_MAX,
+    pid_params.max_integral = LEDC_DUTY_MAX,   // anti-windup
+    pid_params.min_integral = -LEDC_DUTY_MAX,  // anti-windup
+    pid_params.cal_type = PID_CAL_TYPE_POSITIONAL,
  
-    pid_ctrl_config_f_t pid_config = { .init_param = pid_params,};  //Cargo los parámetros en la configuración.
+    pid_config.init_param = pid_params;  //Cargo los parámetros en la configuración.
  
     ESP_ERROR_CHECK(pid_new_control_block_f(    //Creo el control PID
         &pid_config,    //Configuración de PID
@@ -318,133 +394,140 @@ void PID_init ()    //Inicialización del control PID. Se utiliza la librería p
     return; 
 }
 
+void UART_init(){     //Inicialización de UART
+    uart_config_t uart_config = {
+            .baud_rate = 115200,
+            .data_bits = UART_DATA_8_BITS,
+            .parity    = UART_PARITY_DISABLE,
+            .stop_bits = UART_STOP_BITS_1,
+            .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+            .source_clk = UART_SCLK_DEFAULT,
+    };
+
+    ESP_ERROR_CHECK(uart_driver_install(UART_PORT, BUF_SIZE * 2, 0, 0, NULL, 0));    // Instalar driver con buffer de recepción
+    ESP_ERROR_CHECK(uart_param_config(UART_PORT, &uart_config));
+    ESP_ERROR_CHECK(uart_set_pin(UART_PORT, TXD_PIN, RXD_PIN, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
+
+    char InitMsg[] = "Ingrese el angulo deseado (entre 0 y 360) como: set xx.xx seguido de Enter.\r\n"
+        "Ingrese el perfil deseado (Escalon o Rampa) como: set esc/ram seguido de Enter.\r\n"
+        "Para obtener el angulo actual, ingrese: get seguido de Enter.\r\n";
+    uart_write_bytes(UART_PORT, InitMsg, strlen(InitMsg));
+
+    return;
+}
+
+void flash_init (){ //Inicialización de flash
+    esp_err_t ret=nvs_flash_init();
+
+    if (ret==ESP_ERR_NVS_NO_FREE_PAGES||ret==ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret=nvs_flash_init();
+    }
+
+    ESP_ERROR_CHECK(ret);
+    return;
+}
+
 //--------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 //-----------------------------------------------------------CREACION-------------------------------------------------------------------------------------------------------
 //--------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 void create_task()  //Función para crear todas las tareas
 {
-    xTaskCreate(        //TAREA LED BLINK
-        vTaskl_LED_blink,
-        "vTaskl_LED_blink",
-        STACK_SIZE_LED_blink,
-        &ucParameterToPass,
-        1,
-        &xHandle_LED);
-
-     xTaskCreate(       //TAREA LCD_controller
-        task_LCD_controller,
-        "task_LCD_controller",
-        STACK_SIZE_LCD_controller,
-        &ucParameterToPass,
-        2,
-        &xHandle_LCD);
-
-    xTaskCreate(        //TAREA encoder_controller
-        task_encoder_controller,
-        "task_encoder_controller",
-        STACK_SIZE_encoder_controller,
-        &ucParameterToPass,
-        1,
-        &xHandle_encoder);
-
-    xTaskCreate(        //TAREA task_PID
-        task_PID,
-        "task_PID",
-        STACK_SIZE_PID,
-        &ucParameterToPass,
-        1,
-        &xHandle_PID);
-
-    xTaskCreate(        //TAREA BOTON ORIGEN
-        task_BTN_ORIGEN,
-        "task_BTN_ORIGEN",
-        4096,
-        &ucParameterToPass,
-        1,
-        &xHandle_BTN_ORIGEN);
-
-    xTaskCreate(        //TAREA BOTON START
-        task_BTN_START,
-        "task_BTN_START",
-        4096,
-        &ucParameterToPass,
-        1,
-        &xHandle_BTN_START); 
-
-    xTaskCreate(        //TAREA BOTON STOP
-        task_BTN_STOP,
-        "task_BTN_STOP",
-        2048,
-        &ucParameterToPass,
-        1,
-        &xHandle_BTN_STOP);
-
-    xTaskCreate(        //TAREA BOTON MODO
-        task_BTN_MODO,
-        "task_BTN_MODO",
-        2048,
-        &ucParameterToPass,
-        1,
-        &xHandle_BTN_MODO);
+    xTaskCreate(task_LCD_controller,    "task_LCD_controller",      STACK_SIZE_LCD_controller,      &ucParameterToPass,2,   &xHandle_LCD);          //TAREA LCD_controller
+    xTaskCreate(task_encoder_controller,"task_encoder_controller",  STACK_SIZE_encoder_controller,  &ucParameterToPass,1,   &xHandle_encoder);      //TAREA encoder_controller
+    xTaskCreate(task_PID,               "task_PID",                 STACK_SIZE_PID,                 &ucParameterToPass,1,   &xHandle_PID);          //TAREA task_PID
+    xTaskCreate(task_UART,              "task_UART",                STACK_SIZE_UART,                &ucParameterToPass,3,   &xHandle_UART);         //TAREA UART
+    xTaskCreate(task_flash,             "task_flash",               4096,                           &ucParameterToPass,3,   &xHandle_flash);        //TAREA flash
+    xTaskCreate(task_BTN_ORIGEN,        "task_BTN_ORIGEN",          4096,                           &ucParameterToPass,2,   &xHandle_BTN_ORIGEN);   //TAREA BOTON ORIGEN
+    xTaskCreate(task_BTN_START,         "task_BTN_START",           4096,                           &ucParameterToPass,2,   &xHandle_BTN_START);    //TAREA BOTON START
+    xTaskCreate(task_BTN_STOP,          "task_BTN_STOP",            2048,                           &ucParameterToPass,2,   &xHandle_BTN_STOP);     //TAREA BOTON STOP
+    xTaskCreate(task_BTN_MODO,          "task_BTN_MODO",            2048,                           &ucParameterToPass,2,   &xHandle_BTN_MODO);     //TAREA BOTON MODO
 
     return;
 }
 
 void create_queue ()    //TAREA QUE CREA LAS QUEUES
 {   
-    queue_I2C_LCD=xQueueCreate(5,1);
+    queue_uart_pid=xQueueCreate(10,sizeof(pid_data));
+    queue_pid_lcd=xQueueCreate(5, sizeof(lcd_data));
+    queue_pid_uart=xQueueCreate(5, sizeof(uart_data)); 
+    queue_pid_flash=xQueueCreate(5, sizeof(float));  
     return;
 }
 
 //--------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-//-----------------------------------------------------------TAREAS------------------------------------------------------------------------------------------------------
+//-----------------------------------------------------------TAREAS---------------------------------------------------------------------------------------------------------
 //--------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-void vTaskl_LED_blink(void *pvParameters)
+void task_LCD_controller(void *pvParameters)    //TAREA CONTROLLADORA DEL LCD
 {
+    lcd_data datos;
     while (1)
     {
-        led1=!led1;
-        gpio_set_level(LED_1, led1);
-        vTaskDelay(pdMS_TO_TICKS(700));
+        if (xQueueReceive(queue_pid_lcd, &datos, portMAX_DELAY)==pdTRUE) {
+
+            lcd_set_cursor(LCD1, 8, 0); //Angulo actual
+            char buf0[32];
+            snprintf(buf0, sizeof(buf0), "%.2f    ", datos.angulo_actual_lcd);
+            lcd_write_str(LCD1, buf0);
+
+            lcd_set_cursor(LCD1, 8, 1); //Angulo deseado
+            char buf1[32];
+            snprintf(buf1, sizeof(buf1), "%.2f    ", datos.angulo_deseado_lcd);
+            lcd_write_str(LCD1, buf1);
+
+            lcd_set_cursor(LCD1, 8, 2); //Estado
+            char buf3[32];
+            if (datos.estado_lcd==0)        snprintf(buf3, sizeof(buf3), "%s", "En lugar    ");
+            else if (datos.estado_lcd==1)   snprintf(buf3, sizeof(buf3), "%s", "Calculando..");
+            else if (datos.estado_lcd==2)   snprintf(buf3, sizeof(buf3), "%s", "Inactivo    ");
+            else if (datos.estado_lcd==3)   snprintf(buf3, sizeof(buf3), "%s", "Bloqueado   ");
+            lcd_write_str(LCD1, buf3);
+
+            lcd_set_cursor(LCD1, 8, 3); //Perfil
+            char buf2[32];
+            if ((datos.perfil_lcd)==0) snprintf(buf2, sizeof(buf2), "%s", "ESCALON");
+            else snprintf(buf2, sizeof(buf2), "%s", "RAMPA  ");
+            lcd_write_str(LCD1, buf2);
+        }
+        vTaskDelay(pdMS_TO_TICKS(100));
     }
 }
 
-void task_LCD_controller(void *pvParameters)    //TAREA CONTROLLADORA DEL LCD VACIAAAAAAAAAAAAAAAA
-{
-    while (1)
-    {
-        vTaskDelay(pdMS_TO_TICKS(10));
-    }
-}
-
-void task_PID (void *pvParameters)  //CALCULA el PID que se debe aplicar. Muestra los parámetros por consola
+void task_PID (void *pvParameters)  //CALCULA el PID que se debe aplicar. Muestra los parámetros por consola y por el LCD
 {
     while (1) {
+        pid_data datos_uart;
 
-        esp_err_t err = as5600_get_angle_degrees(as5600_dev, &angulo_actual);    //Lee angulo del encoder
-
-        if (err != ESP_OK) ESP_LOGE(ESP_LOGI_TAG, "Error leyendo AS5600: %s", esp_err_to_name(err)); //Detecta si hay error en la lectura del ángulo
-
-        float error=angulo_deseado-angulo_actual;   //Crea la variable de error
-
-        error=normalizar_error(error);  //Normalizo el error para que vaya por el camino mas corto
-
-        if (fabsf(error) < BANDA_ERROR) {  //Si el error está dentro del ángulo permitido. . . 
-            MOTOR_stop();   //Frena motor
-            pid_reset_ctrl_block_f(pid_ctrl);   //Frena el control PID
-        } 
-        else {
-            ESP_ERROR_CHECK(pid_compute_f(pid_ctrl, error, &PID_output));   //Calculo la respuesta PID necesaria
-            task_H_controller(PID_output);                                  //Aplico la respuesta PID al motor
+        if (xQueueReceive(queue_uart_pid, &datos_uart, 0) == pdTRUE) {
+            angulo_deseado = datos_uart.angulo_deseado_pid;
+            xQueueSend(queue_pid_flash, &angulo_deseado, 0);
+            modo = datos_uart.perfil_pid;
         }
-  
-        ESP_LOGI(ESP_LOGI_TAG, 
-            "Angulo actual: %.2f | deseado: %.2f | error: %.2f | salida PID: %.2f", 
-            angulo_actual, angulo_deseado, error, PID_output);   //Muestro valores relevantes
+
+        if (!activo){
+            lcd_data datos;
+            datos.angulo_actual_lcd=angulo_actual;
+            datos.angulo_deseado_lcd=angulo_deseado;
+            datos.perfil_lcd= modo;  
+            datos.estado_lcd=2; //ESTADO INACTIVO
+            xQueueSend(queue_pid_lcd, &datos, 0);
+            motor_stop();
+        } 
+        else if (modo==1) pid_rampa();       
+        else if(modo==0)pid_escalon();
+        
+        lcd_data datos;
+            datos.angulo_actual_lcd=angulo_actual;
+            datos.angulo_deseado_lcd=angulo_deseado;
+            datos.perfil_lcd= modo;  
+            datos.estado_lcd=1; //ESTADO CALCULANDO. . . .
+        xQueueSend(queue_pid_lcd, &datos, 0);
 
         vTaskDelay(pdMS_TO_TICKS(PID_time));
+
+        ISR_on=1;
     }
 }
 
@@ -453,17 +536,6 @@ void task_encoder_controller(void *pvParameters)    //TAREA CONTROLADORA DEL ENC
     while (1){
         vTaskDelay(pdMS_TO_TICKS(10));
     }
-}
-
-void task_I2C_guard ()  //VACIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
-{
-}
-
-float normalizar_error(float error)  //Función para que el motor siempre vaya por el camino mas corto
-{
-    while (error>180.0f)  error -= 360.0f;
-    while (error<-180.0f) error += 360.0f;
-    return error;
 }
 
 void task_H_controller(float pid_output) //Aplica la respuesta PID necesaria al motor
@@ -500,6 +572,7 @@ void task_H_controller(float pid_output) //Aplica la respuesta PID necesaria al 
     else {        //Si la salida es CERO...
         gpio_set_level(L298N_IN1, 0);
         gpio_set_level(L298N_IN2, 0);
+        
     }
 
     ledc_set_duty(LEDC_MODE, LEDC_CHANNEL, (uint32_t)magnitud); //Coloca el PWM necesario
@@ -511,14 +584,224 @@ void task_current_sens ()
     if(OBS_detect>50) OBS_flag=1;
 }
 
-void MOTOR_stop ()  //FRENA el motor
+void task_UART(void *pvParameters)
 {
+    uint8_t data[BUF_SIZE];
+    char buffer[UART_LINE_BUF_SIZE]; //buffer para almacenar la linea completa de entrada
+    int pos = 0; //posicion actual en el buffer de linea
+
+    pid_data datos;
+    
+    while (1) {
+
+        int len=uart_read_bytes(UART_PORT, data, BUF_SIZE - 1, pdMS_TO_TICKS(100)); //lee el angulo ingresado
+ 
+        if (len>0) { //cuando la funcion uart_read_bytes() devuelve una cantidad de bytes comienza:
+            
+            for (int i=0; i<len; i++) { //recorre cada caracter recibido
+                char c=(char)data[i]; 
+                if (c=='\n'||c=='\r') {     //cuando llega al final...
+                    if (pos>0) { //si habia caracteres acumulados, se agrega /0 para q sea string
+                        buffer[pos]='\0';                    
+                        lectura_datos_uart (buffer, &datos);
+                        pos = 0; //reinicia la posicion del buffer de linea para la proxima entrada
+                    }
+                    xQueueSend(queue_uart_pid, &datos, 0);
+                } else if (pos<(UART_LINE_BUF_SIZE-1))buffer[pos++]=c; //si el caracter recibido no es salto y buffer no esta lleno, se agrega el caracter al buffer                    
+            }
+        }
+    }   
+}
+
+void task_flash(void *pvParameters){
+    float data_recibido;
+
+    while(1){
+        if(xQueueReceive(queue_pid_flash, &data_recibido, portMAX_DELAY)==pdTRUE){  //Se recibieron datos para guardar...
+            lectura_flash=1;
+            nvs_handle_t handle;
+            esp_err_t err=nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle);
+
+            if (err!=ESP_OK) return;
+    
+            err=nvs_set_blob(handle, NVS_KEY_ANGULO, &data_recibido, sizeof(float));//Guarda en ángulo con el key 
+
+            if (err==ESP_OK) err=nvs_commit(handle);
+    
+            if (err!=ESP_OK)  ESP_LOGW("FLASH", "Error guardando angulo en NVS: %s", esp_err_to_name(err));
+
+            nvs_close(handle);
+            ESP_LOGE("FLASH", "Angulo deseado guardado en NVS: %.2f", data_recibido);
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
+
+//--------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+//-----------------------------------------------------------FUNCIONES------------------------------------------------------------------------------------------------------
+//--------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+void motor_stop ()  //FRENA el motor
+{
+    lcd_data datos;
+        datos.angulo_actual_lcd=angulo_actual;
+        datos.angulo_deseado_lcd=angulo_deseado;
+        datos.perfil_lcd= modo;  
+        datos.estado_lcd=0; //ESTADO DETENIDO
+        xQueueSend(queue_pid_lcd, &datos, 0);
+
     gpio_set_level(L298N_IN1, 0);
     gpio_set_level(L298N_IN2, 0);
 
     ledc_set_duty(LEDC_MODE, LEDC_CHANNEL, 0);
     ledc_update_duty(LEDC_MODE, LEDC_CHANNEL);
     return;
+}
+
+float normalizar_error(float error)  //Función para que el motor siempre vaya por el camino mas corto
+{
+    while (error>180.0f)  error -= 360.0f;
+    while (error<-180.0f) error += 360.0f;
+    return error;
+}
+
+void lectura_datos_uart(const char *buffer, pid_data *datos){
+    
+    bool pid_mod=0;
+
+    if (strncmp(buffer,"set ", 4)==0){   //Si empieza con set
+        if (strcmp(buffer,"set esc")==0) datos->perfil_pid=0;        //Caso de cambio de perfil A ESCALON
+
+        else if (strcmp(buffer,"set ram")==0) datos->perfil_pid=1;   //Caso de cambio de perfil A RAMPA
+
+        else {  //Se intentó ingresar un angulo
+            char *endptr = NULL;
+            float angulo_recibido = strtof(buffer+4, &endptr);      //Para saltear el set 
+
+            if (endptr==buffer) {                                   //EL VALOR ES INVALIDO
+                const char *err = "ERR: dato invalido\r\n";
+                uart_write_bytes(UART_PORT, err, strlen(err));
+
+            } else if (angulo_recibido<0 ||angulo_recibido>360){    //EL VALOR ESTÁ FUERA DE RANGO
+                const char *err = "ERR: fuera de rango\r\n";
+                uart_write_bytes(UART_PORT, err, strlen(err));
+
+            } else{  //EL ANGULO ES VALIDO  
+                datos->angulo_deseado_pid=angulo_recibido;        
+                xQueueSend(queue_pid_flash,&angulo_deseado,0);
+            } 
+        }
+    } else if (strncmp(buffer,"get",3)==0){  //Si se usa get
+        char out[64];
+        snprintf(out, sizeof(out), "Angulo actual: %.2f\r\n", angulo_actual);
+        uart_write_bytes(UART_PORT, out, strlen(out));
+
+    } else if (strncmp(buffer, "KP=", 3)==0) {
+        float nuevo_kp = strtof(buffer + 3, NULL);
+        PID_KP = nuevo_kp;
+        pid_mod=1;
+
+    } else if (strncmp(buffer, "KI=", 3) == 0) {
+        float nuevo_ki = strtof(buffer + 3, NULL);
+        PID_KI = nuevo_ki;
+        pid_mod=1;
+
+    } else if (strncmp(buffer, "KD=", 3) == 0) {
+        float nuevo_kd = strtof(buffer + 3, NULL);
+        PID_KD = nuevo_kd;
+        pid_mod=1;
+    }    
+
+    if(pid_mod) pid_actualizar (PID_KP, PID_KI, PID_KD);    ///Si se modificó el PID
+
+    return;
+}
+
+void pid_actualizar (float PID_KP, float PID_KI,float PID_KD){
+    pid_params.kp = PID_KP;     
+    pid_params.ki = PID_KI;
+    pid_params.kd = PID_KD;
+
+    return;
+}
+
+void pid_escalon(){
+
+    pid_actualizar (PID_KP, PID_KI, PID_KD);
+
+    esp_err_t err = as5600_get_angle_degrees(as5600_dev, &angulo_actual);    //Lee angulo del encoder
+
+    if (err != ESP_OK) ESP_LOGE(ESP_LOGI_TAG, "Error leyendo AS5600: %s", esp_err_to_name(err)); //Detecta si hay error en la lectura del ángulo
+
+    float error=angulo_deseado-angulo_actual;   //Crea la variable de error
+
+    error=normalizar_error(error);  //Normalizo el error para que vaya por el camino mas corto
+
+    if (fabsf(error) < BANDA_ERROR) {  //Si el error está dentro del ángulo permitido. . . 
+        motor_stop();   //Frena motor
+        pid_reset_ctrl_block_f(pid_ctrl);   //Frena el control PID
+    } else {
+        ESP_ERROR_CHECK(pid_compute_f(pid_ctrl, error, &PID_output));   //Calculo la respuesta PID necesaria
+        task_H_controller(PID_output);                                  //Aplico la respuesta PID al motor
+    }
+
+    ESP_LOGI(ESP_LOGI_TAG,"Angulo actual: %.2f | deseado: %.2f | e: %.2f | PID: %.2f| ESCALON", angulo_actual, angulo_deseado, error, PID_output);   //Muestro valores relevantes
+    return;
+}
+
+void pid_rampa(){
+
+    pid_actualizar (15.0f, 0.0f, 0.1f);
+
+    esp_err_t err = as5600_get_angle_degrees(as5600_dev, &angulo_actual);    //Lee angulo del encoder
+    if (err != ESP_OK) ESP_LOGE(ESP_LOGI_TAG, "Error leyendo AS5600: %s", esp_err_to_name(err)); //Detecta si hay error en la lectura del ángulo
+
+    float error=normalizar_error(angulo_deseado-angulo_actual); //Normalizo el error
+    int signo_error=(error>0.0f)?1:(error<0.0f?-1:0);       //Obtengo el signo del error
+
+    float paso = fminf(RESOLUCION_RAMPA, fabsf(error));     //Para que la rampa tenga un paso no constante
+    float angulo_deseado_rampa=angulo_actual+signo_error*paso;
+
+    float error_rampa=normalizar_error(angulo_deseado_rampa-angulo_actual);
+
+    if (fabsf(error) < BANDA_ERROR) {
+        motor_stop();
+        pid_reset_ctrl_block_f(pid_ctrl);
+    } else {
+        ESP_ERROR_CHECK(pid_compute_f(pid_ctrl, error_rampa, &PID_output));
+        task_H_controller(PID_output);
+    }
+
+    ESP_LOGI(ESP_LOGI_TAG,
+        "Act: %.2f | Dest: %.2f | e: %.2f | e_rampa: %.2f | PID: %.2f | RAMPA",
+        angulo_actual, angulo_deseado, error, error_rampa, PID_output);
+    return;
+}
+
+float leer_flash()    //Función para TOMAR el ángulo deseado de FLASH
+{
+    nvs_handle_t handle;
+    float angulo=0.0f; // valor por defecto si es la primera vez
+
+    esp_err_t err=nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle);
+
+    if (err!=ESP_OK) {
+        ESP_LOGI("FLASH", "No hay config previa en NVS, usando default (%.2f)", angulo);
+        return angulo;
+    }
+    
+    size_t size=sizeof(angulo);
+    err = nvs_get_blob(handle, NVS_KEY_ANGULO, &angulo, &size);
+
+    if (err != ESP_OK) {
+        ESP_LOGW("FLASH", "No se pudo leer angulo de NVS, usando default");
+        angulo = 0.0f;
+
+    } else ESP_LOGI("FLASH", "Angulo deseado recuperado de NVS: %.2f", angulo);
+    
+    nvs_close(handle);
+    return angulo;
 }
 
 //--------------------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -529,7 +812,7 @@ void MOTOR_stop ()  //FRENA el motor
 void IRAM_ATTR isr_BTN_ORIGEN(void *arg)    //Interrupción de boton ORIGEN
 {
     if (!rebote){
-        rebote=0;
+        rebote=1;
         xTaskResumeFromISR(xHandle_BTN_ORIGEN);
     }
     return;
@@ -546,7 +829,10 @@ void IRAM_ATTR isr_BTN_START(void *arg)     //Interrupción de boton START / PID
 
 void IRAM_ATTR isr_BTN_STOP(void *arg)      //Interrupción de boton STOP/ calibrar CERO
 {
-    xTaskResumeFromISR(xHandle_BTN_STOP);
+    if (!rebote){
+        rebote=1;
+        xTaskResumeFromISR(xHandle_BTN_STOP);
+    }
     return;
 }
 
@@ -563,7 +849,8 @@ void task_BTN_ORIGEN (void *pvParameters)  //Función del boton ORIGEN
 {
     while (1){
         angulo_deseado=0.0;
-        vTaskDelay(pdMS_TO_TICKS(100));
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        rebote=0;
         vTaskSuspend(NULL);
     }
 }
@@ -572,9 +859,7 @@ void task_BTN_START (void *pvParameters)  //Función del boton START:
 {
     while (1){
         activo=!activo;
-        as5600_set_zero_position(as5600_dev);
-        as5600_get_angle_degrees(as5600_dev, &angulo_deseado);
-        vTaskDelay(pdMS_TO_TICKS(500)); //para antirrebote
+        vTaskDelay(pdMS_TO_TICKS(1000)); //para antirrebote
         rebote=0;
         vTaskSuspend(NULL);
     }
@@ -584,7 +869,9 @@ void task_BTN_STOP (void *pvParameters)  //Cambia el angulo deseado a la posici�
 {
     while (1){
         as5600_get_angle_degrees(as5600_dev, &angulo_deseado);
-        vTaskDelay(pdMS_TO_TICKS(100));
+        xQueueSend(queue_pid_flash,&angulo_deseado,0);
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        rebote=0;
         vTaskSuspend(NULL);
     }
 }
@@ -593,7 +880,7 @@ void task_BTN_MODO (void *pvParameters)  //Función del boton MODO: Modifica per
 {
     while (1){
         modo=!modo;
-        vTaskDelay(pdMS_TO_TICKS(100));
+        vTaskDelay(pdMS_TO_TICKS(1000));
         rebote=0;
         vTaskSuspend(NULL);
     }

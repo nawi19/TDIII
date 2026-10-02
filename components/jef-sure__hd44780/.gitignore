@@ -1,0 +1,45 @@
+# Build directories
+build/
+dist/
+*.o
+*.a
+*.so
+*.elf
+*.bin
+*.map
+
+# ESP-IDF
+sdkconfig
+sdkconfig.old
+dependencies.lock
+managed_components/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Backup files
+*.old
+*.bak
+*.tmp
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+venv/
+env/
+
+# Logs
+*.log
+
+# OS
+Thumbs.db
+.directory
+.clangd
+.clang-format
