@@ -5,9 +5,12 @@ Boton START:    ON/OFF del PID (con PID apagado, el motor no tiene fuerza).
 Boton STOP:     El motor FRENA en el angulo actual. El angulo deseado=angulo actual
 Boton MODO:     Cambia los perfiles, entre RAMPA y ESCALON
 
+En la terminal:
+    set: angulo de 0 a 360. (enter).
+    get: (enter). Me devuelve el angulo actual del eje.
+    exec: ram (enter) o esc (enter). Cambio entre escalon y rampa. 
 
-
-HOLA NAHHUIII 2/10/26
+HOLA NAHHUIII 17:18
 */
 
 #include <stdio.h>
@@ -63,9 +66,9 @@ HOLA NAHHUIII 2/10/26
 #define LEDC_DUTY_RES   LEDC_TIMER_10_BIT   // 0-1023
 #define LEDC_FREQUENCY  100             
 #define LEDC_DUTY_MAX   1023.0f
-#define LEDC_DUTY_OBS   70.0f      //Para la implementación de detección de obstaculos     
+#define LEDC_DUTY_OBS   300.0f      //Para la implementación de detección de obstaculos     
 
-#define MOTOR_MIN_DUTY  85.0f
+#define MOTOR_MIN_DUTY  80.0f//85
 #define BANDA_ERROR     2.0f
 #define PID_time        10                        
 
@@ -134,16 +137,17 @@ bool start=0;       //VARIABLES DE BOTONES
 bool stop=0;        //VARIABLES DE BOTONES
 bool modo=0;        //VARIABLES DE BOTONES   0:escalon 1:rampa
 
-int OBS_detect=0;
-bool OBS_flag=0;
+volatile int OBS_detect=0;
+volatile bool OBS_flag=0;
+volatile int OBS_dir = 0;
 
 float angulo_actual;
 float angulo_deseado;
 float PID_output=0.0f;
 
-float PID_KP=1.0    ;       //CONSTANTE PID
-float PID_KI;       //CONSTANTE PID
-float PID_KD;       //CONSTANTE PID
+float PID_KP=0.55f;       //CONSTANTE PID
+float PID_KI=0.00f;       //CONSTANTE PID
+float PID_KD=0.14f;       //CONSTANTE PID
 
 typedef struct {
     float angulo_actual_uart;
@@ -378,16 +382,16 @@ void PWM_init (){   //Inicialización del PWM (mediante la librería LEDC)
 
 void PID_init ()    //Inicialización del control PID. Se utiliza la librería pid_ctrl
 {
-    pid_params.kp = PID_KP,
-    pid_params.ki = PID_KI,
-    pid_params.kd = PID_KD,
-    pid_params.max_output = LEDC_DUTY_MAX,
-    pid_params.min_output = -LEDC_DUTY_MAX,
-    pid_params.max_integral = LEDC_DUTY_MAX,   // anti-windup
-    pid_params.min_integral = -LEDC_DUTY_MAX,  // anti-windup
-    pid_params.cal_type = PID_CAL_TYPE_POSITIONAL,
- 
-    pid_config.init_param = pid_params;  //Cargo los parámetros en la configuración.
+        pid_params.kp = PID_KP,
+        pid_params.ki = PID_KI,
+        pid_params.kd = PID_KD,
+        pid_params.max_output = LEDC_DUTY_MAX,
+        pid_params.min_output = -LEDC_DUTY_MAX,
+        pid_params.max_integral = LEDC_DUTY_MAX,   // anti-windup
+        pid_params.min_integral = -LEDC_DUTY_MAX,  // anti-windup
+        pid_params.cal_type = PID_CAL_TYPE_POSITIONAL,
+
+    pid_config.init_param = pid_params;
  
     ESP_ERROR_CHECK(pid_new_control_block_f(    //Creo el control PID
         &pid_config,    //Configuración de PID
@@ -411,7 +415,7 @@ void UART_init(){     //Inicialización de UART
     ESP_ERROR_CHECK(uart_set_pin(UART_PORT, TXD_PIN, RXD_PIN, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
 
     char InitMsg[] = "Ingrese el angulo deseado (entre 0 y 360) como: set xx.xx seguido de Enter.\r\n"
-        "Ingrese el perfil deseado (Escalon o Rampa) como: set esc/ram seguido de Enter.\r\n"
+        "Ingrese el perfil deseado (Escalon o Rampa) como: exec esc/ram seguido de Enter.\r\n"
         "Para obtener el angulo actual, ingrese: get seguido de Enter.\r\n";
     uart_write_bytes(UART_PORT, InitMsg, strlen(InitMsg));
 
@@ -519,7 +523,7 @@ void task_PID (void *pvParameters)  //CALCULA el PID que se debe aplicar. Muestr
         } 
         else if (modo==1) pid_rampa();       
         else if(modo==0)pid_escalon();
-        
+
         lcd_data datos;
             datos.angulo_actual_lcd=angulo_actual;
             datos.angulo_deseado_lcd=angulo_deseado;
@@ -544,37 +548,38 @@ void task_H_controller(float pid_output) //Aplica la respuesta PID necesaria al 
 {
     float magnitud = fabsf(pid_output); //Calcula valor absoluto de la salida generada por el PID
     
+    static float ang_prev=0.0f;
+
     if (!activo) pid_output=0.0;        //Si se desactivó  el PID. . . 
 
-    if (magnitud < MOTOR_MIN_DUTY && magnitud > 0.0f)  magnitud = MOTOR_MIN_DUTY;   //Si la salida es menor que el MIN_DUTY...
+    if (magnitud<MOTOR_MIN_DUTY && magnitud > 0.0f)  magnitud=MOTOR_MIN_DUTY;   //Si la salida es menor que el MIN_DUTY...
 
-    if (magnitud >= LEDC_DUTY_MAX)  magnitud = LEDC_DUTY_MAX;     //Si la salida es mayor que el MAX_DUTY...
+    if (magnitud>=LEDC_DUTY_MAX)  magnitud = LEDC_DUTY_MAX;     //Si la salida es mayor que el MAX_DUTY...
        
-    if (magnitud>=LEDC_DUTY_OBS){ OBS_detect++; }     //Para implementar la detección de obstaculo
-    else {OBS_detect=0;}
 
-    task_current_sens();
+    if (magnitud>0.0f && fabsf(angulo_actual-ang_prev)<2.0f) OBS_detect++;   //Si esta frenado en un  angulo, y se quiere mover, detect++
+    else OBS_detect=0;
 
-    if (OBS_flag) {
-        pid_output *=-1.0f;   //le cambio el signo al pid para que vaya para el otro lado
-        OBS_flag=0;
-        OBS_detect=0;
+    ang_prev=angulo_actual;
+
+    if (OBS_detect>50){
+        //OBS_flag=1;
+        OBS_dir=(pid_output>0.0f) ? -1 : 1;   // el sentido contrario al que se trabó
+        OBS_detect = 0;
     }
 
-    if (pid_output > 0.0f) {    //Si la salida es positiva... HORARIO
+
+    if (pid_output > 0.0f) {        //Si la salida es positiva... HORARIO
         gpio_set_level(L298N_IN1, 1);
         gpio_set_level(L298N_IN2, 0);
-
     } 
-    else if (pid_output < 0.0f) { //Si la salida es negativa... ANTIHORARIO
+    else if (pid_output < 0.0f) {   //Si la salida es negativa... ANTIHORARIO
         gpio_set_level(L298N_IN1, 0);
         gpio_set_level(L298N_IN2, 1);
-
     } 
-    else {        //Si la salida es CERO...
+    else {                          //Si la salida es CERO...
         gpio_set_level(L298N_IN1, 0);
-        gpio_set_level(L298N_IN2, 0);
-        
+        gpio_set_level(L298N_IN2, 0);   
     }
 
     ledc_set_duty(LEDC_MODE, LEDC_CHANNEL, (uint32_t)magnitud); //Coloca el PWM necesario
@@ -658,13 +663,24 @@ void motor_stop ()  //FRENA el motor
 
     ledc_set_duty(LEDC_MODE, LEDC_CHANNEL, 0);
     ledc_update_duty(LEDC_MODE, LEDC_CHANNEL);
+
+    OBS_flag=0;
     return;
 }
 
-float normalizar_error(float error)  //Función para que el motor siempre vaya por el camino mas corto
+float normalizar_error(float error)
 {
-    while (error>180.0f)  error -= 360.0f;
-    while (error<-180.0f) error += 360.0f;
+    while(error>180.0f) error-=360.0f;
+    while(error<-180.0f) error+=360.0f;
+
+    if(OBS_flag){
+        if(fabsf(error)<20.0f){
+            OBS_flag=0;
+        }else{
+            if(OBS_dir>0&&error<0.0f) error+=360.0f;
+            if(OBS_dir<0&&error>0.0f) error-=360.0f;
+        }
+    }
     return error;
 }
 
@@ -672,44 +688,38 @@ void lectura_datos_uart(const char *buffer, pid_data *datos){
     
     bool pid_mod=0;
 
-    if (strncmp(buffer,"set ", 4)==0){   //Si empieza con set
-        if (strcmp(buffer,"set esc")==0) datos->perfil_pid=0;        //Caso de cambio de perfil A ESCALON
+    if (strncmp(buffer,"set ", 4)==0){   //Si empieza con set, Se intentó ingresar un angulo
+        char *endptr = NULL;
+        float angulo_recibido = strtof(buffer+4, &endptr);      //Para saltear el set 
 
-        else if (strcmp(buffer,"set ram")==0) datos->perfil_pid=1;   //Caso de cambio de perfil A RAMPA
+        if (endptr==buffer) {                                   //EL VALOR ES INVALIDO
+            const char *err = "ERR: dato invalido\r\n";
+            uart_write_bytes(UART_PORT, err, strlen(err));
 
-        else {  //Se intentó ingresar un angulo
-            char *endptr = NULL;
-            float angulo_recibido = strtof(buffer+4, &endptr);      //Para saltear el set 
+        } else if (angulo_recibido<0 ||angulo_recibido>360){    //EL VALOR ESTÁ FUERA DE RANGO
+            const char *err = "ERR: fuera de rango\r\n";
+            uart_write_bytes(UART_PORT, err, strlen(err));
 
-            if (endptr==buffer) {                                   //EL VALOR ES INVALIDO
-                const char *err = "ERR: dato invalido\r\n";
-                uart_write_bytes(UART_PORT, err, strlen(err));
-
-            } else if (angulo_recibido<0 ||angulo_recibido>360){    //EL VALOR ESTÁ FUERA DE RANGO
-                const char *err = "ERR: fuera de rango\r\n";
-                uart_write_bytes(UART_PORT, err, strlen(err));
-
-            } else{  //EL ANGULO ES VALIDO  
-                datos->angulo_deseado_pid=angulo_recibido;        
-                xQueueSend(queue_pid_flash,&angulo_deseado,0);
-            } 
-        }
-    } else if (strncmp(buffer,"get",3)==0){  //Si se usa get
+        } else{  //EL ANGULO ES VALIDO  
+            datos->angulo_deseado_pid=angulo_recibido;        
+            xQueueSend(queue_pid_flash,&angulo_deseado,0);
+        } 
+    }else if (strncmp(buffer,"get",3)==0){  //Si se usa get
         char out[64];
         snprintf(out, sizeof(out), "Angulo actual: %.2f\r\n", angulo_actual);
         uart_write_bytes(UART_PORT, out, strlen(out));
 
-    } else if (strncmp(buffer, "KP=", 3)==0) {
-        float nuevo_kp = strtof(buffer + 3, NULL);
-        PID_KP = nuevo_kp;
+    }else if(strcmp(buffer,"exec esc")==0) datos->perfil_pid=0;   //Caso de cambio de perfil A ESCALON
+    else if (strcmp(buffer,"exec ram")==0) datos->perfil_pid=1;   //Caso de cambio de perfil A RAMPA
+    else if (strncmp(buffer, "KP=", 3)==0) {    //Modificiación parametros PID
+        float nuevo_kp = strtof(buffer+3, NULL);
+        PID_KP=nuevo_kp;
         pid_mod=1;
-
-    } else if (strncmp(buffer, "KI=", 3) == 0) {
+    } else if (strncmp(buffer, "KI=", 3)==0) {
         float nuevo_ki = strtof(buffer + 3, NULL);
         PID_KI = nuevo_ki;
         pid_mod=1;
-
-    } else if (strncmp(buffer, "KD=", 3) == 0) {
+    } else if (strncmp(buffer, "KD=", 3)==0) {
         float nuevo_kd = strtof(buffer + 3, NULL);
         PID_KD = nuevo_kd;
         pid_mod=1;
@@ -724,6 +734,8 @@ void pid_actualizar (float PID_KP, float PID_KI,float PID_KD){
     pid_params.kp = PID_KP;     
     pid_params.ki = PID_KI;
     pid_params.kd = PID_KD;
+
+    pid_update_parameters(pid_ctrl, &pid_params);
 
     return;
 }
@@ -748,7 +760,7 @@ void pid_escalon(){
         task_H_controller(PID_output);                                  //Aplico la respuesta PID al motor
     }
 
-    ESP_LOGI(ESP_LOGI_TAG,"Angulo actual: %.2f | deseado: %.2f | e: %.2f | PID: %.2f| ESCALON", angulo_actual, angulo_deseado, error, PID_output);   //Muestro valores relevantes
+    ESP_LOGI(ESP_LOGI_TAG,"Angulo actual: %.2f | deseado: %.2f | PID: %.2f| ESCALON", angulo_actual, angulo_deseado, PID_output);   //Muestro valores relevantes
     return;
 }
 
@@ -765,7 +777,7 @@ void pid_rampa(){
     float paso = fminf(RESOLUCION_RAMPA, fabsf(error));     //Para que la rampa tenga un paso no constante
     float angulo_deseado_rampa=angulo_actual+signo_error*paso;
 
-    float error_rampa=normalizar_error(angulo_deseado_rampa-angulo_actual);
+    float error_rampa=angulo_deseado_rampa-angulo_actual;
 
     if (fabsf(error) < BANDA_ERROR) {
         motor_stop();
