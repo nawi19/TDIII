@@ -23,7 +23,7 @@
     "board/esp32s3-builtin.cfg"
   ],
   "idf.portWin": "COM9",
-  "idf.currentSetup": "D:\\Escritorio\\Facu\\Programas\\ESP_IDF\\.espressif\\v6.0\\esp-idf",
+  "idf.currentSetup": "C:\\Users\\camig\\Desktop\\Facu\\Programas\\.espressif\\v6.0\\esp-idf",
   "idf.customExtraVars": {
     "IDF_TARGET": "esp32s3"
   },
@@ -34,5 +34,5 @@
     "--compile-commands-dir=d:\\Escritorio\\Facu\\UTN\\2026\\TDIII\\27.08.26\\build"
   ],
   "idf.flashType": "UART",
-  "idf.port": "COM9"
+  "idf.port": "COM3"
 }
