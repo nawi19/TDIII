@@ -1,5 +1,4 @@
 /*
-
 Boton ORIGEN:   El motor va a 0°: el angulo deseado es 0°
 Boton START:    ON/OFF del PID (con PID apagado, el motor no tiene fuerza). 
 Boton STOP:     El motor FRENA en el angulo actual. El angulo deseado=angulo actual
@@ -10,7 +9,7 @@ En la terminal:
     get: (enter). Me devuelve el angulo actual del eje.
     exec: ram (enter) o esc (enter). Cambio entre escalon y rampa. 
 
-HOLA NAHHUIII 5/10 11:48
+5/10 13:32
 */
 
 #include <stdio.h>
@@ -402,8 +401,8 @@ void create_task()  //Función para crear todas las tareas
 {
     xTaskCreate(task_LCD_controller,    "task_LCD_controller",      4096,   &ucParameterToPass,1,   &xHandle_LCD);          //TAREA LCD_controller
     xTaskCreate(task_PID,               "task_PID",                 4096,   &ucParameterToPass,1,   &xHandle_PID);          //TAREA task_PID
-    xTaskCreate(task_UART_guard,        "task_UART_guard",          4096,   &ucParameterToPass,3,   &xHandle_UART);         //TAREA UART
-    xTaskCreate(task_flash,             "task_flash",               4096,   &ucParameterToPass,3,   &xHandle_flash);        //TAREA flash
+    xTaskCreate(task_UART_guard,        "task_UART_guard",          4096,   &ucParameterToPass,2,   &xHandle_UART);         //TAREA UART
+    xTaskCreate(task_flash,             "task_flash",               4096,   &ucParameterToPass,2,   &xHandle_flash);        //TAREA flash
     xTaskCreate(task_BTN_ORIGEN,        "task_BTN_ORIGEN",          4096,   &ucParameterToPass,3,   &xHandle_BTN_ORIGEN);   //TAREA BOTON ORIGEN
     xTaskCreate(task_BTN_START,         "task_BTN_START",           4096,   &ucParameterToPass,3,   &xHandle_BTN_START);    //TAREA BOTON START
     xTaskCreate(task_BTN_STOP,          "task_BTN_STOP",            2048,   &ucParameterToPass,3,   &xHandle_BTN_STOP);     //TAREA BOTON STOP
@@ -520,8 +519,13 @@ void task_UART_guard(void *pvParameters)  //Tarea que monitorea los datos median
                         buffer[pos]='\0';                    
                         lectura_datos_uart (buffer, &datos);
                         pos = 0; //reinicia la posicion del buffer de linea para la proxima entrada
+                        if (datos.angulo_deseado_pid>=0 || datos.perfil_pid>=0){
+                            xQueueSend(queue_uart_pid, &datos, 0);  //Envía los datos al PID
+                            datos.angulo_deseado_pid=-1;
+                            datos.perfil_pid=-1;
+                        }
                     }
-                    xQueueSend(queue_uart_pid, &datos, 0);  //Envía los datos al PID
+                    
                 } else if (pos<(UART_LINE_BUF_SIZE-1))buffer[pos++]=c; //si el caracter recibido no es salto y buffer no esta lleno, se agrega el caracter al buffer                    
             }
         }
