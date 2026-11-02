@@ -1,0 +1,26 @@
+/dts-v1/;
+/plugin/;
+
+/ {
+	compatible = "brcm,bcm2712";
+
+	/* La Pi 5 maneja GPIO/UART con el chip RP1, con un pinctrl propio
+	 * distinto al de la BCM2711 (Pi4). En vez de armar un grupo de pines
+	 * a mano como en la variante Pi4 -- no tenemos verificada la
+	 * codificacion numerica del pinmux de RP1 -- se referencia el grupo
+	 * "uart3_pins" que ya viene correcto en el arbol base de la Pi 5,
+	 * mismo patron que usa el overlay oficial uart3-pi5-overlay.dts. */
+	fragment@0 {
+		target = <&uart3>;
+		__overlay__ {
+			pinctrl-0 = <&uart3_pins>;
+			status = "okay";
+
+			esp32_link: esp32-link {
+				compatible = "td3,esp32-link";
+				current-speed = <115200>;
+				status = "okay";
+			};
+		};
+	};
+};

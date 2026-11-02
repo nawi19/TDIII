@@ -1,0 +1,24 @@
+/dts-v1/;
+/plugin/;
+
+/ {
+	compatible = "brcm,bcm2711";
+
+	/* Grupo de pinctrl propio: GPIO4/GPIO5 en ALT4 (TXD3/RXD3), sin
+	 * depender del pinctrl implicito del arbol base ni del overlay
+	 * oficial "uart3" de la Raspberry Pi Foundation. */
+
+
+	fragment@0 {
+		target = <&uart3>;
+		__overlay__ {
+			status = "okay";
+
+			esp32_link: esp32-link {
+				compatible = "td3,esp32-link";
+				current-speed = <115200>;
+				status = "okay";
+			};
+		};
+	};
+};

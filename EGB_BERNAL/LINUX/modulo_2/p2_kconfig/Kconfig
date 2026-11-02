@@ -1,0 +1,7 @@
+config HELLO_VERBOSE
+    bool "Mensajes detallados al cargar el modulo"
+    default n
+    help
+      Si se activa, el modulo imprime un mensaje adicional
+      al cargarse con informacion sobre la configuracion
+      de compilacion.

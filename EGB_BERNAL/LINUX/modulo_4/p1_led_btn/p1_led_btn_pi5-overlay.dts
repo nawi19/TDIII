@@ -1,0 +1,18 @@
+/dts-v1/;
+/plugin/;
+
+/ {
+	compatible = "brcm,bcm2712";
+
+	fragment@0 {
+		target-path = "/";
+		__overlay__ {
+			ledbtn: ledbtn {
+				compatible = "td3,ledbtn";
+				led-gpios = <&gpio 17 0>;
+				boton-gpios = <&gpio 27 1>;
+				status = "okay";
+			};
+		};
+	};
+};

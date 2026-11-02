@@ -1,0 +1,32 @@
+Comando para subir carpeta: sube archivos de la pc a la RPI, queda en el home de LSE, por eso el ":"
+
+		scp -r "C:\Users\Cami\Desktop\ecu_linux" lse@lse-pi4-xx.local:
+
+Comandos a ejecutar para examen raspberry: 
+
+		dtc -@ -I dts -O dtb -o esp32-link.dtbo esp32-link-pi4-overlay.dts	//compila el dts (texto) a dto (binario)
+
+		sudo dtoverlay -d . esp32-link		//Aplica el overlay "en caliente"
+
+Para verificar: Verifica que el nodo quedó en el árbol en vivo. Si no devuelve nada, el overlay no se aplicó.
+
+	find /sys/firmware/devicetree/base -name esp32-link
+
+
+Para ejecutar:
+
+	make		//compila el módulo de kernel
+
+	sudo insmod build/esp32_link.ko //inserta el módulo
+
+Verificar nodo:
+
+	ls -l /dev/esp32link	//Verifica que el dispositivo existe. Tiene que empezar con c (carácter). 
+				//Si empieza con -, es un archivo común y hay que borrarlo con sudo rm -f /dev/esp32link y recargar el módulo.
+
+	gcc -Wall -pthread -o eq_ctl eq_ctl.c	//Compila el programa en C: 
+						//-Wall muestra todos los warnings, 
+						//-pthread enlaza la librería de hilos (usa un hilo monitor) y 
+						//-o eq_ctl nombra el ejecutable.
+
+	sudo ./eq_ctl	//Lo ejecuta
