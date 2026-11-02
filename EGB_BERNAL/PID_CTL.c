@@ -26,6 +26,9 @@
 
 #define DEV_PATH "/dev/esp32link"   //Archivo de dispositivo que crea el driver en probe() con device_create()
 
+#define ANGULO_MIN 0.0f
+#define ANGULO_MAX 360.0f
+
 static int fd_esp32;    //File descriptor del dispositivo: global porque lo usan main() y el hilo.
 
 static pthread_mutex_t consola = PTHREAD_MUTEX_INITIALIZER; // Mutex para que el hilo receptor y principal no mezclen sus printf() en la terminal (ambos escriben por stdout).
@@ -36,18 +39,18 @@ static void *hilo_monitor(void *arg)    //Hilo receptor: loop bloqueante de read
     ssize_t leidos;    // cantidad de bytes devueltos por read() 
 
     //read() se duerme en el driver (wait_event_interruptible) hasta que llega una linea completa; devuelve <= 0 recien al cerrar el fd. 
+    
+    (void)arg;  //para evitar warning de unused parameter
 
     while ((leidos = read(fd_esp32, rx, sizeof(rx) - 1)) > 0) {
         rx[leidos] = '\0';   // read() no agrega terminador: lo ponemos nosotros 
         
         pthread_mutex_lock(&consola);
-        
         printf("[esp32] %s", rx);
 
         if (rx[leidos - 1] != '\n') printf("\n");   // si no vino con salto de linea, lo agregamos 
             
         fflush(stdout);
-
         pthread_mutex_unlock(&consola);
     }
     return NULL;
@@ -58,21 +61,22 @@ static void uso(const char *argv0) //Muestra la ayuda de uso por stderr.
     fprintf(stderr,
             "Uso interactivo: %s\n"
             "  Despues, en el prompt:\n"
-            "    set VARIABLE VALOR\n"
-            "    get VARIABLE\n"
-            "    exec ACCION\n"
+            "    set ANGULO      (%.0f a %.0f)\n"
+            "    get\n"
+            "    exec ram|esc    (rampa | escalon)\n"
+            "    KP=V | KI=V | KD=V\n"
             "    salir\n",
-            argv0);
+            argv0, ANGULO_MIN, ANGULO_MAX);
 }
 
 int main(int argc, char *argv[])
 {
     pthread_t hilo_receptor;            // hilo que imprime lo que llega del ESP32 
-    struct esp32_var ajuste;            // par banda/nivel que viaja por ioctl 
     char comando[64];                   // linea completa leida de stdin 
-    char modo[16];                      // nombre del preset para "exec" 
-    char banda[ESP32_VAR_NAME_MAX];     // nombre de la banda: low / mid / high 
-    int nivel;                          // valor numerico a fijar en la banda 
+    char modo[8];                      // nombre del preset para "exec" 
+    //char banda[ESP32_VAR_NAME_MAX];     // nombre de la banda: low / mid / high 
+    char *fin;
+    float valor;                         // valor numerico a fijar en la banda 
  
     if (argc > 1) { //Este programa es interactivo: no recibe argumentos. Si se pasa alguno, se muestra la ayuda y se sale. */
         uso(argv[0]);
@@ -86,45 +90,48 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    pthread_create(&hilo_rx, NULL, hilo_monitor, NULL); //Lanzar el hilo receptor: asi las respuestas del ESP32 se ven apenas llegan, sin esperar a que el usuario escriba otro comando. 
-
-    while (fgets(comando, sizeof(comando), stdin)) {    //Loop principal: una linea de stdin = un comando.
-        if (!strncmp(comando, "salir", 5))
-            break;
-
-        if (sscanf(comando, "set %15s %d", banda, &nivel) == 2) {
-            /* set BANDA NIVEL: se arma la estructura y se manda por ioctl.
-             * El driver la convierte en "set BANDA NIVEL\n" por la UART. */
-            strncpy(ajuste.nombre, banda, sizeof(ajuste.nombre) - 1);
-            ajuste.nombre[sizeof(ajuste.nombre) - 1] = '\0';
-            ajuste.valor = nivel;
-            if (ioctl(fd_esp32, ESP32_SET, &ajuste) < 0)
-                perror("ioctl ESP32_SET");
-
-        } else if (sscanf(comando, "get %15s", banda) == 1) {
-            /* get BANDA: el ioctl bloquea hasta que el ESP32 responde y deja
-             * el valor leido en ajuste.valor (ESP32_GET es de ida y vuelta). */
-            strncpy(ajuste.nombre, banda, sizeof(ajuste.nombre) - 1);
-            ajuste.nombre[sizeof(ajuste.nombre) - 1] = '\0';
-            if (ioctl(fd_esp32, ESP32_GET, &ajuste) == 0) {
-                pthread_mutex_lock(&consola);
-                printf("%s = %d\n", ajuste.nombre, ajuste.valor);
-                pthread_mutex_unlock(&consola);
-            } else {
-                perror("ioctl ESP32_GET");
-            }
-
-        } else if (sscanf(comando, "exec %15s", modo) == 1) { //exec PRESET: no tiene ioctl propio, se manda como texto con write() y el driver lo reenvia tal cual al ESP32. */
-            char orden[32];
-            snprintf(orden, sizeof(orden), "exec %s\n", modo);
-
-            if (write(fd_esp32, orden, strlen(orden)) < 0) perror("write");
-                
-
-        } else  uso(argv[0]);   //Comando no reconocido: mostrar ayuda.
-           
+  if (pthread_create(&hilo_receptor, NULL, hilo_monitor, NULL) != 0) {
+        perror("pthread_create");
+        close(fd_esp32);
+        return 1;
     }
 
+    while (fgets(comando, sizeof(comando), stdin)) {
+        comando[strcspn(comando, "\r\n")] = '\0';   // Quitar el salto de linea
+ 
+        if (!strncmp(comando, "set ", 4)) {
+            valor = strtof(comando + 4, &fin);
+            if (fin == comando + 4) {
+                fprintf(stderr, "Dato invalido\n");
+                continue;
+            }
+            if (valor < ANGULO_MIN || valor > ANGULO_MAX) {
+                fprintf(stderr, "Angulo fuera de rango (%.0f a %.0f)\n",
+                        ANGULO_MIN, ANGULO_MAX);
+                continue;
+            }
+            enviar("set %.2f", valor);
+ 
+        } else if (!strcmp(comando, "get")) {
+            enviar("get");      // La respuesta la imprime el hilo receptor.
+ 
+        } else if (sscanf(comando, "exec %7s", accion) == 1) {
+            for (char *p = accion; *p; p++)
+                *p = tolower((unsigned char)*p);
+ 
+            if (strcmp(accion, "ram") && strcmp(accion, "esc")) {
+                fprintf(stderr, "Accion invalida: usar ram o esc\n");
+                continue;
+            }
+            enviar("exec %s", accion);
+ 
+        } else {
+            uso(argv[0]);
+        }
+    }
+ 
+    pthread_cancel(hilo_receptor);
+    pthread_join(hilo_receptor, NULL);
     close(fd_esp32);
     return 0;
 }

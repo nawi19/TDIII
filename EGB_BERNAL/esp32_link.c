@@ -43,12 +43,12 @@ MODULE_LICENSE("GPL");
 MODULE_AUTHOR("TD3 -- UTN FRA");
 MODULE_DESCRIPTION("Char device sobre serdev: protocolo set/get/exec con un ESP32-S3 por UART");
 
-/* Estado global del driver (hay un solo ESP32, por eso es global). */
-static dev_t           dev_num;        /* major/minor reservado */
-static struct cdev     esp32_cdev;     /* char device registrado en el kernel */
-static struct class   *esp32_class;    /* clase para que udev cree /dev/esp32link */
-static struct device  *esp32_device;   /* nodo de dispositivo */
-static struct serdev_device *esp32_serdev; /* handle de la UART (serdev) */
+// Estado global del driver (hay un solo ESP32, por eso es global). 
+static dev_t           dev_num;        // major/minor reservado 
+static struct cdev     esp32_cdev;     // char device registrado en el kernel 
+static struct class   *esp32_class;    // clase para que udev cree /dev/esp32link 
+static struct device  *esp32_device;   // nodo de dispositivo
+static struct serdev_device *esp32_serdev; /* handle de la UART (serdev) 
 
 /* read() como productor-consumidor: receive_buf() (productor) empuja cada
  * linea completa acá; esp32_read() (consumidor) se bloquea si esta vacio. */
@@ -139,16 +139,14 @@ static ssize_t esp32_read(struct file *file, char __user *buf,
     unsigned int copiados;
     int ret;
 
-    if (kfifo_is_empty(&rx_fifo)) {
-        /* Sin datos: no bloquear si se pidio modo no bloqueante */
+    if (kfifo_is_empty(&rx_fifo)) { // Sin datos: no bloquear si se pidio modo no bloqueante
         if (file->f_flags & O_NONBLOCK)
             return -EAGAIN;
         if (wait_event_interruptible(rx_wait, !kfifo_is_empty(&rx_fifo)))
             return -ERESTARTSYS;
     }
 
-    /* Copiar del kfifo al buffer del usuario (hasta len bytes) */
-    ret = kfifo_to_user(&rx_fifo, buf, len, &copiados);
+    ret = kfifo_to_user(&rx_fifo, buf, len, &copiados); //Copiar del kfifo al buffer del usuario (hasta len bytes)
     if (ret)
         return ret;
 
@@ -165,7 +163,7 @@ static ssize_t esp32_write(struct file *file, const char __user *buf,
     int    ret;
 
     if (n >= sizeof(local))
-        n = sizeof(local) - 1; /* nunca copiar mas de lo que entra en local[] */
+        n = sizeof(local) - 1; // nunca copiar mas de lo que entra en local[] 
 
     if (copy_from_user(local, buf, n))
         return -EFAULT;
@@ -281,7 +279,7 @@ static const struct file_operations esp32_fops = {
     .unlocked_ioctl = esp32_ioctl,
 };
 
-/* ===================== serdev: probe/remove ===================== */
+/* ======================================= serdev: probe/remove ========================= */
 
 /* probe(): el kernel la llama cuando encuentra en el Device Tree el nodo
  * compatible con este driver. Configura la UART y crea /dev/esp32link.
