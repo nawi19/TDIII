@@ -23,7 +23,7 @@
     "board/esp32s3-builtin.cfg"
   ],
   "idf.portWin": "COM9",
-  "idf.currentSetup": "C:\\Users\\camig\\Desktop\\Facu\\Programas\\.espressif\\v6.0\\esp-idf",
+  "idf.currentSetup": "D:\\Escritorio\\Facu\\Programas\\ESP_IDF\\.espressif\\v6.0\\esp-idf",
   "idf.customExtraVars": {
     "IDF_TARGET": "esp32s3"
   },
