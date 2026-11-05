@@ -1,7 +1,0 @@
-ssh lse@lse-pi4-07.local
-
-
-password: lse
-
-
-scp-r ponerlaruta: carpeta	

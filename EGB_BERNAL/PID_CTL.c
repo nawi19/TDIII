@@ -58,6 +58,30 @@ static void *hilo_monitor(void *arg)    //Hilo receptor: loop bloqueante de read
     return NULL;
 }
 
+
+static int enviar(const char *fmt, ...) { //Arma la linea con printf-style, le agrega '\n' y la manda al driver.
+    char linea[48];
+    va_list ap;
+    int n;
+ 
+    va_start(ap, fmt);
+    n = vsnprintf(linea, sizeof(linea) - 1, fmt, ap);
+    va_end(ap);
+ 
+    if (n < 0 || n >= (int)sizeof(linea) - 1) {
+        fprintf(stderr, "Comando demasiado largo\n");
+        return -1;
+    }
+ 
+    linea[n++] = '\n';
+    if (write(fd_esp32, linea, n) < 0) {
+        perror("write");
+        return -1;
+    }
+    return 0;
+}
+
+
 int main(int argc, char *argv[])
 {
     pthread_t hilo_receptor;    // hilo que imprime lo que llega del ESP32 
@@ -82,7 +106,7 @@ int main(int argc, char *argv[])
     while (fgets(comando, sizeof(comando), stdin)) {
         comando[strcspn(comando, "\r\n")] = '\0';   // Quitar el salto de linea
         
-        if (strncmp(comando, "salir")) break;
+        if (!(strcmp(comando, "salir"))) break;
 
         if (!strncmp(comando, "set ", 4)) {
             valor = strtof(comando + 4, &fin);
@@ -102,18 +126,18 @@ int main(int argc, char *argv[])
         } else if (!strcmp(comando, "get")) {
             enviar("get");      // La respuesta la imprime el hilo receptor.
  
-        } else if (sscanf(comando, "exec %7s", accion) == 1) {
-            for (char *p = accion; *p; p++)
+        } else if (sscanf(comando, "exec %7s", modo) == 1) {
+            for (char *p = modo; *p; p++)
                 *p = tolower((unsigned char)*p);
  
-            if (strcmp(accion, "ram") && strcmp(accion, "esc")) {
+            if (strcmp(modo, "ram") && strcmp(modo, "esc")) {
                 fprintf(stderr, "Accion invalida: usar ram o esc\n");
                 continue;
             }
-            enviar("exec %s", accion);
+            enviar("exec %s", modo);
  
         } else if (comando [0] !='\0'){
-            uso(argv[0]);
+            fprintf(stderr, "Comando invalido\n");
         }
     }
  
@@ -123,24 +147,3 @@ int main(int argc, char *argv[])
     return 0;
 }
 
-static int enviar(const char *fmt, ...) { //Arma la linea con printf-style, le agrega '\n' y la manda al driver.
-    char linea[48];
-    va_list ap;
-    int n;
- 
-    va_start(ap, fmt);
-    n = vsnprintf(linea, sizeof(linea) - 1, fmt, ap);
-    va_end(ap);
- 
-    if (n < 0 || n >= (int)sizeof(linea) - 1) {
-        fprintf(stderr, "Comando demasiado largo\n");
-        return -1;
-    }
- 
-    linea[n++] = '\n';
-    if (write(fd_esp32, linea, n) < 0) {
-        perror("write");
-        return -1;
-    }
-    return 0;
-}
